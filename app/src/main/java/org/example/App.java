@@ -49,6 +49,7 @@ public class App {
     static class ManejadorCliente implements Runnable {
         private final Socket socket;
         private final ObjectOutputStream out;
+        private String nombreAsignado = "Desconocido";
 
         public ManejadorCliente(Socket socket, ObjectOutputStream out) {
             this.socket = socket;
@@ -61,12 +62,15 @@ public class App {
                 while (true) {
                     PaqueteMensaje mensaje = (PaqueteMensaje) in.readObject();
                     if (mensaje != null) {
+                        if (nombreAsignado.equals("Desconocido")) {
+                            nombreAsignado = mensaje.getRemitente();
+                        }
                         actualizarHistorial(mensaje);
                         difundir(mensaje);
                     }
                 }
             } catch (IOException | ClassNotFoundException e) {
-                System.out.println("Fallo detectado (Crash/Omisión): Un cliente se ha desconectado.");
+                System.out.println("Fallo detectado: Se perdió la conexión con el nodo [" + nombreAsignado + "].");
             } finally {
                 limpiarRecursos();
             }

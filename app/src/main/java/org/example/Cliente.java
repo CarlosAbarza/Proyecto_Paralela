@@ -1,6 +1,10 @@
 package org.example;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.net.Socket;
 
 public class Cliente {
@@ -33,6 +37,7 @@ public class Cliente {
             }
         } catch (IOException e) {
             System.err.println("Conexión perdida con el servidor.");
+            System.exit(0);
         }
     }
 
@@ -44,7 +49,7 @@ public class Cliente {
             this.out = out;
             this.nombre = nombre;
         }
-
+        
         @Override
         public void run() {
             BufferedReader teclado = new BufferedReader(new InputStreamReader(System.in));
@@ -52,10 +57,12 @@ public class Cliente {
                 while (true) {
                     String texto = teclado.readLine();
                     if (texto != null && !texto.trim().isEmpty()) {
-                        // Limpieza ANSI: Sube el cursor y borra la línea escrita por el usuario
                         System.out.print("\033[1A\033[2K");
                         
-                        out.writeObject(new PaqueteMensaje(nombre, texto));
+                        PaqueteMensaje.Tipo tipo = texto.startsWith("/") ? 
+                                PaqueteMensaje.Tipo.COMANDO : PaqueteMensaje.Tipo.TEXTO;
+                        
+                        out.writeObject(new PaqueteMensaje(nombre, texto, tipo));
                         out.flush();
                     }
                 }

@@ -18,41 +18,103 @@ public class NodoBot {
 
     public static void main(String[] args) {
         String host = args.length > 0 ? args[0] : "localhost";
-        int puerto = args.length > 1 ? Integer.parseInt(args[1]) : Config.PUERTO_CLIENTES_NODO_1;
+        int puertoInicial = args.length > 1 ? Integer.parseInt(args[1]) : Config.PUERTO_CLIENTES_NODO_1;
 
-        try {
-            Socket socket = new Socket(host, puerto);
-            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-            out.flush();
+        int nodoActual = -1;
+        for (int i = 1; i <= Config.NUM_NODOS; i++) {
+            if (Config.getPuertoClientes(i) == puertoInicial) {
+                nodoActual = i;
+                break;
+            }
+        }
 
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+        boolean primerIntento = true;
+        int intentosFallidosConsecutivos = 0;
+        int maxIntentos = 2 * Config.NUM_NODOS;
 
-            enviarAuth(out);
-            enviarLogin(out);
-
-            System.out.println(NOMBRE_BOT + " conectado a " + host + ":" + puerto);
-            System.out.println("Motor concurrente y memoria dinámica activados.");
-
-            while (true) {
-                try {
-                    PaqueteMensaje mensaje = (PaqueteMensaje) in.readObject();
-
-                    if ((mensaje.getTipo() == PaqueteMensaje.Tipo.COMANDO ||
-                            (mensaje.getTipo() == PaqueteMensaje.Tipo.REPLICA && mensaje.getContenido().startsWith("/")))
-                            && !mensaje.getRemitente().equals(NOMBRE_BOT)) {
-
-                        poolComandos.execute(new ProcesadorComando(mensaje, out));
-                    }
-
-                } catch (ClassNotFoundException e) {
-                    System.err.println("[BOT] Error procesando paquete recibido.");
+        while (true) {
+            int puerto;
+            if (primerIntento && nodoActual == -1) {
+                puerto = puertoInicial;
+            } else {
+                if (nodoActual == -1) {
+                    nodoActual = 1;
                 }
+                puerto = Config.getPuertoClientes(nodoActual);
             }
 
-        } catch (IOException e) {
-            System.err.println("[BOT] El bot perdió conexión con el servidor principal. Cerrando proceso...");
-            poolComandos.shutdownNow();
-            System.exit(0);
+            Socket socket = null;
+            ObjectOutputStream out = null;
+            ObjectInputStream in = null;
+
+            try {
+                System.out.println("[BOT] Intentando conectar a " + host + ":" + puerto + 
+                        (nodoActual != -1 ? " (Nodo " + nodoActual + ")" : "") + "...");
+                socket = new Socket(host, puerto);
+                out = new ObjectOutputStream(socket.getOutputStream());
+                out.flush();
+
+                in = new ObjectInputStream(socket.getInputStream());
+
+                enviarAuth(out);
+                enviarLogin(out);
+
+                System.out.println(NOMBRE_BOT + " conectado a " + host + ":" + puerto);
+                System.out.println("Motor concurrente y memoria dinámica activados.");
+                
+                primerIntento = false;
+                intentosFallidosConsecutivos = 0; // Resetear al conectar exitosamente
+
+                while (true) {
+                    try {
+                        PaqueteMensaje mensaje = (PaqueteMensaje) in.readObject();
+
+                        if ((mensaje.getTipo() == PaqueteMensaje.Tipo.COMANDO ||
+                                (mensaje.getTipo() == PaqueteMensaje.Tipo.REPLICA && mensaje.getContenido().startsWith("/")))
+                                && !mensaje.getRemitente().equals(NOMBRE_BOT)) {
+
+                            poolComandos.execute(new ProcesadorComando(mensaje, out));
+                        }
+
+                    } catch (ClassNotFoundException e) {
+                        System.err.println("[BOT] Error procesando paquete recibido: " + e.getMessage());
+                    }
+                }
+
+            } catch (IOException e) {
+                System.err.println("[BOT] Conexión perdida o fallida con el servidor en " + host + ":" + puerto + ".");
+                
+                try {
+                    if (in != null) in.close();
+                    if (out != null) out.close();
+                    if (socket != null) socket.close();
+                } catch (IOException ex) {
+                    // ignorar
+                }
+
+                intentosFallidosConsecutivos++;
+                if (intentosFallidosConsecutivos >= maxIntentos) {
+                    System.err.println("[BOT] Todos los servidores del clúster están caídos tras " + maxIntentos + " intentos (2 vueltas completas). Cerrando bot...");
+                    poolComandos.shutdownNow();
+                    System.exit(1);
+                }
+
+                if (nodoActual != -1) {
+                    nodoActual = (nodoActual % Config.NUM_NODOS) + 1;
+                } else {
+                    nodoActual = 1;
+                }
+                
+                primerIntento = false;
+
+                System.err.println("[BOT] Intentando reconectar al próximo servidor en 3 segundos...");
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
     }
 

@@ -6,3 +6,12 @@ build
 
 # Ignore Kotlin plugin data
 .kotlin
+
+# Ignore log files
+*.log
+logs/
+
+# Ignore compiled class files / IDE output
+bin/
+out/
+.DS_Store

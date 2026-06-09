@@ -15,14 +15,20 @@ public class Cliente {
 
     public static void main(String[] args) {
         String host = args.length > 0 ? args[0] : "localhost";
-        int puertoInicial = args.length > 1 ? Integer.parseInt(args[1]) : Config.PUERTO_CLIENTES_NODO_1;
+        int puertoInicial = args.length > 1 ? Integer.parseInt(args[1]) : -1;
 
         int nodoActual = -1;
-        for (int i = 1; i <= Config.NUM_NODOS; i++) {
-            if (Config.getPuertoClientes(i) == puertoInicial) {
-                nodoActual = i;
-                break;
+        if (puertoInicial != -1) {
+            for (int i = 1; i <= Config.NUM_NODOS; i++) {
+                if (Config.getPuertoClientes(i) == puertoInicial) {
+                    nodoActual = i;
+                    break;
+                }
             }
+        } else {
+            // Balanceador de carga: elegir un nodo inicial al azar para distribuir las conexiones en el clúster
+            nodoActual = new java.util.Random().nextInt(Config.NUM_NODOS) + 1;
+            System.out.println("[BALANCEADOR] Seleccionando de forma aleatoria el Nodo " + nodoActual + " para distribuir la carga.");
         }
 
         BufferedReader teclado = new BufferedReader(new InputStreamReader(System.in));
@@ -30,6 +36,17 @@ public class Cliente {
         int intentosFallidosConsecutivos = 0;
         int maxIntentos = 2 * Config.NUM_NODOS;
 
+        /*
+         * CICLO PRINCIPAL DE CONEXIÓN Y REINTENTOS DEL CLIENTE:
+         * - Qué hace: Intenta establecer conexión con uno de los servidores del clúster de forma circular.
+         * - Con quién se comunica: Con el NodoServidor correspondiente al puerto de clientes seleccionado.
+         * - De qué depende: De la disponibilidad de red, del host y de que al menos un servidor del clúster esté levantado.
+         * - Manejo de errores y reconexión: Si ocurre un fallo al conectar o durante la sesión activa (IOException),
+         *   se cierra el socket localmente, se incrementa el contador de fallos consecutivos y se duerme el hilo 3 segundos.
+         *   Luego, cambia el puerto para apuntar al siguiente nodo del clúster (de forma circular 1 -> 2 -> 3 -> 1)
+         *   y vuelve a intentar. Si se superan 'maxIntentos' (2 vueltas completas al clúster sin éxito), se asume que
+         *   todo el clúster está caído y el programa finaliza.
+         */
         while (true) {
             int puerto;
             if (primerIntento && nodoActual == -1) {
@@ -77,6 +94,15 @@ public class Cliente {
                 primerIntento = false;
                 intentosFallidosConsecutivos = 0; // Resetear al conectar exitosamente
 
+                /*
+                 * CICLO DE LECTURA DE MENSAJES DEL SERVIDOR:
+                 * - Qué hace: Lee de forma bloqueante y continua los mensajes que difunde el servidor.
+                 * - Con quién se comunica: Con el NodoServidor al que está conectado.
+                 * - De qué depende: De que la conexión TCP establecida con el servidor permanezca activa.
+                 * - Manejo de errores: Si falla la deserialización, se muestra un aviso por consola y continúa.
+                 *   Si ocurre una IOException (desconexión del servidor), se propaga al try externo para manejar
+                 *   el proceso de reconexión.
+                 */
                 while (true) {
                     try {
                         PaqueteMensaje mensaje = (PaqueteMensaje) in.readObject();
@@ -178,6 +204,14 @@ public class Cliente {
 
         @Override
         public void run() {
+            /*
+             * CICLO DE LECTURA DE TECLADO Y ENVÍO DE MENSAJES:
+             * - Qué hace: Lee de forma continua los comandos y textos escritos por el usuario en la terminal y los envía al servidor.
+             * - Con quién se comunica: Con el usuario a través de la entrada estándar, y con el servidor remoto a través de 'outStream'.
+             * - De qué depende: De la entrada de la terminal y del estado de 'outStream' (que no sea null).
+             * - Manejo de errores: Si ocurre un error de escritura (IOException) o si 'outStream' es nulo debido a una desconexión en proceso,
+             *   muestra un mensaje de error y el ciclo continúa esperando que el ciclo de conexión principal restablezca 'outStream'.
+             */
             while (true) {
                 try {
                     String texto = teclado.readLine();

@@ -1,6 +1,9 @@
 package org.example.loadtest;
 
 import org.example.Config;
+import org.example.PaqueteMensaje;
+import java.io.*;
+import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -51,6 +54,12 @@ public class GeneradorCarga {
         // --- Lanzar clientes ---
         metricas.iniciar();
 
+        /*
+         * CICLO DE INICIALIZACIÓN DE CLIENTES SIMULTÁNEOS:
+         * - Qué hace: Crea y lanza individualmente cada ClienteCarga en el pool de hilos.
+         * - Con quién se comunica: Registra localmente cada cliente en la lista 'clientes' y los asigna en round-robin a los 3 servidores.
+         * - De qué depende: De la configuración 'numClientes'.
+         */
         for (int i = 0; i < numClientes; i++) {
             int puerto = puertos[i % 3]; // Round-robin entre los 3 servidores
             String nombre = "C" + String.format("%03d", i);
@@ -62,36 +71,58 @@ public class GeneradorCarga {
         System.out.println("✓ " + numClientes + " clientes lanzados (distribuidos entre 3 servidores).");
         System.out.println();
 
-        // --- Instrucciones de falla inducida ---
-        System.out.println("┌──────────────────────────────────────────────────┐");
-        System.out.println("│  ⚠️  INSTRUCCIONES DE FALLA INDUCIDA:            │");
-        System.out.println("│                                                  │");
-        System.out.println("│  A los ~30 segundos, derribar el coordinador     │");
-        System.out.println("│  (Nodo 3) con Ctrl+C en su terminal.             │");
-        System.out.println("│                                                  │");
-        System.out.println("│  Luego presionar ENTER aquí para marcar la       │");
-        System.out.println("│  falla en las métricas.                          │");
-        System.out.println("└──────────────────────────────────────────────────┘");
-        System.out.println();
-
-        // --- Hilo para esperar que el usuario marque la falla ---
+        // --- Hilo para simular falla inducida de forma automática (Punto 4) ---
         Thread hiloFalla = new Thread(() -> {
             try {
-                System.in.read(); // Esperar ENTER
+                System.out.println("[AUTOMACIÓN] Esperando 30 segundos para derribar al coordinador...");
+                Thread.sleep(30000);
+                
+                // Derribar al coordinador (Nodo 3)
+                int nodoADerribar = 3;
+                int puertoADerribar = Config.getPuertoClientes(nodoADerribar);
+                System.out.println("[AUTOMACIÓN] Enviando señal de apagado automático al Nodo " + nodoADerribar + " (puerto " + puertoADerribar + ")...");
+                
+                try (Socket socket = new Socket(host, puertoADerribar);
+                     ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
+                    out.flush();
+                    PaqueteMensaje shutdownMsg = new PaqueteMensaje(
+                        "Admin",
+                        Config.TOKEN_VALIDO,
+                        PaqueteMensaje.Tipo.SHUTDOWN
+                    );
+                    out.writeObject(shutdownMsg);
+                    out.flush();
+                    System.out.println("[AUTOMACIÓN] ✓ Nodo " + nodoADerribar + " derribado programáticamente.");
+                } catch (Exception e) {
+                    System.err.println("[AUTOMACIÓN] ❌ No se pudo derribar el Nodo " + nodoADerribar + ": " + e.getMessage());
+                }
+
+                // Registrar la falla en las métricas
                 metricas.marcarFalla();
-                System.out.println("✓ Falla marcada. Continuando prueba...");
-            } catch (Exception e) {
-                // Ignorar
+                System.out.println("[AUTOMACIÓN] ✓ Falla registrada en las métricas.");
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-        }, "MarcarFalla");
+        }, "FallaAutomatica");
         hiloFalla.setDaemon(true);
         hiloFalla.start();
 
         // --- Monitoreo en tiempo real ---
         Thread monitor = new Thread(() -> {
             try {
+                /*
+                 * CICLO DE MONITOREO EN TIEMPO REAL:
+                 * - Qué hace: Mide y muestra en la terminal cada 10 segundos las métricas actuales del tráfico generado.
+                 * - Con quién se comunica: Con el objeto 'metricas' para obtener los totales de envíos, respuestas y errores.
+                 * - De qué depende: De que se cumpla la duración total definida de la prueba.
+                 */
                 for (int seg = 1; seg <= duracion; seg++) {
                     Thread.sleep(1000);
+                    // Capturar conexiones activas justo antes de terminar la prueba para comprobar reconexión (Punto 5)
+                    if (seg == duracion - 5) {
+                        metricas.capturarConexionesFinales();
+                    }
                     if (seg % 10 == 0) {
                         System.out.printf("[T=%ds] Envíos: %d | Respuestas: %d | Errores: %d%n",
                                 seg,

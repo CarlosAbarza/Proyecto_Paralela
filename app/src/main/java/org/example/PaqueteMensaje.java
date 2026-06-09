@@ -14,7 +14,7 @@ public class PaqueteMensaje implements Serializable {
         AUTH,
         LOGIN,
         SISTEMA,
-        // Tipos para coordinación distribuida (Fase 1+)
+        // Tipos para coordinación distribuida
         HEARTBEAT,
         ELECTION,
         ELECTION_OK,
@@ -23,15 +23,20 @@ public class PaqueteMensaje implements Serializable {
         TOKEN_REQUEST,
         TOKEN_RELEASE,
         REPLICA,
-        MEMBERSHIP_UPDATE
+        MEMBERSHIP_UPDATE,
+        // Nuevos tipos para auditoría y mejoras
+        SHUTDOWN,
+        SYNC_REQUEST,
+        SYNC_RESPONSE
     }
 
     private final String remitente;
     private final String contenido;
     private final LocalDateTime fechaEnvio;
     private final Tipo tipo;
-    private volatile int lamportTimestamp;  // Marca lógica de Lamport (volatile para visibilidad entre hilos)
-    private volatile int nodoOrigenId;     // ID del nodo servidor que originó/procesó el mensaje
+    private volatile int lamportTimestamp;
+    private volatile int nodoOrigenId;
+    private volatile int epoch; // Época/Generación del token o coordinador
 
     public PaqueteMensaje(String remitente, String contenido, Tipo tipo) {
         this.remitente = remitente != null ? remitente : "Desconocido";
@@ -40,6 +45,7 @@ public class PaqueteMensaje implements Serializable {
         this.fechaEnvio = LocalDateTime.now();
         this.lamportTimestamp = 0;
         this.nodoOrigenId = -1;
+        this.epoch = 0;
     }
 
     // Getters originales
@@ -53,6 +59,8 @@ public class PaqueteMensaje implements Serializable {
     public void setLamportTimestamp(int lamportTimestamp) { this.lamportTimestamp = lamportTimestamp; }
     public int getNodoOrigenId() { return nodoOrigenId; }
     public void setNodoOrigenId(int nodoOrigenId) { this.nodoOrigenId = nodoOrigenId; }
+    public int getEpoch() { return epoch; }
+    public void setEpoch(int epoch) { this.epoch = epoch; }
 
     public String getFechaFormateada() {
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HH:mm:ss");

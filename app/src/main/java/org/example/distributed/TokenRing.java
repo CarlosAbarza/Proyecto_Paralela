@@ -85,6 +85,14 @@ public class TokenRing {
      * no se puede pasar el token mientras se verifica/ejecuta una sección crítica.
      */
     private void cicloToken() {
+        /*
+         * CICLO DE GESTIÓN LOCAL DEL TOKEN:
+         * - Qué hace: Administra la posesión del token de exclusión mutua. Intenta extraer operaciones de escritura
+         *   pendientes de la cola y ejecutarlas de forma atómica. Si no hay operaciones en 500ms, pasa el token al siguiente nodo.
+         * - Con quién se comunica: Con la cola de operaciones locales ('operacionesPendientes') y con otros nodos al pasar el token.
+         * - De qué depende: De la bandera 'activo' y de 'tengoToken' (que indica que el token reside actualmente en este nodo).
+         * - Manejo de errores: Si el hilo es interrumpido (InterruptedException), se restaura el estado y finaliza el ciclo.
+         */
         while (activo && tengoToken) {
             try {
                 // Intentar ejecutar operaciones pendientes (esperar hasta 500ms)
@@ -116,6 +124,21 @@ public class TokenRing {
      * Si el envío falla, reintenta con el siguiente nodo activo.
      * Solo libera el token cuando el envío es exitoso (evita pérdida del token).
      */
+    /**
+     * Pasa el token al siguiente nodo activo en el anillo.
+     * Anillo lógico: 1 → 2 → 3 → 1
+     * Si el envío falla, reintenta con el siguiente nodo activo.
+     * Solo libera el token cuando el envío es exitoso (evita pérdida del token).
+     *
+     * AUDITORÍA / MEJORA POTENCIAL:
+     * - Limitación de Sockets TCP: 'peer.enviar()' escribe en el buffer de salida del socket local.
+     *   Si la conexión de red está medio caída (half-closed), 'flush()' podría no lanzar IOException
+     *   inmediatamente, haciendo que el token se considere "entregado" cuando en realidad se perdió.
+     * - Token Duplicado: Si ocurre una elección y cambio de coordinador, el token se regenera. 
+     *   Si un token viejo estaba en tránsito (TCP buffer) al mismo tiempo, el token podría duplicarse.
+     *   Mejora: Agregar un "número de término o época" (epoch/generation number) al token. Si el
+     *   token recibido tiene una época menor a la actual del coordinador, debe descartarse.
+     */
     private void pasarToken() {
         int siguiente = obtenerSiguienteNodo();
         if (siguiente == nodoId) {
@@ -131,10 +154,20 @@ public class TokenRing {
             "TOKEN",
             PaqueteMensaje.Tipo.TOKEN_PASS
         );
+        tokenMsg.setEpoch(servidor.getEpochCoordinador());
 
         // Intentar enviar al siguiente; si falla, probar con otros nodos activos
         int intentos = 0;
         int nodoDestino = siguiente;
+        /*
+         * CICLO DE ENVÍO Y RUTA DEL TOKEN:
+         * - Qué hace: Intenta pasar el token al siguiente nodo lógico del anillo.
+         * - Con quién se comunica: Con los peers a través del método 'servidor.enviarAPeer()'.
+         * - De qué depende: De la disponibilidad de red y de las conexiones TCP activas en el mapa de peers.
+         * - Manejo de errores y tolerancia a fallos: Si el envío al siguiente nodo falla, captura el fallo de red,
+         *   busca el siguiente nodo activo en el anillo y vuelve a intentar. Solo libera el token local ('tengoToken = false')
+         *   cuando se confirma que el envío fue exitoso. Si todos los intentos fallan, conserva el token localmente.
+         */
         while (intentos < Config.NUM_NODOS) {
             servidor.enviarAPeer(nodoDestino, tokenMsg);
             // Verificar si el peer sigue conectado después del envío
@@ -163,6 +196,12 @@ public class TokenRing {
      */
     private int obtenerSiguienteNodo() {
         int siguiente = nodoId;
+        /*
+         * CICLO DE BÚSQUEDA DEL SIGUIENTE NODO EN EL ANILLO:
+         * - Qué hace: Recorre circularmente los nodos del clúster buscando el primer nodo activo distinto de sí mismo.
+         * - Con quién se comunica: Consulta localmente al módulo de membresía ('servidor.getMembresia()').
+         * - De qué depende: Del número total de nodos configurados y del estado en el registro de membresía.
+         */
         for (int i = 0; i < Config.NUM_NODOS; i++) {
             siguiente = (siguiente % Config.NUM_NODOS) + 1;
             if (siguiente != nodoId && servidor.getMembresia().isActivo(siguiente)) {
@@ -178,6 +217,11 @@ public class TokenRing {
     public void procesarMensaje(PaqueteMensaje mensaje) {
         switch (mensaje.getTipo()) {
             case TOKEN_PASS:
+                // Auditoría: comprobar la época del token antes de aceptarlo
+                if (mensaje.getEpoch() < servidor.getEpochCoordinador()) {
+                    log.registrar("TOKEN", "Token OBSOLETO descartado (token epoch: " + mensaje.getEpoch() + ", local: " + servidor.getEpochCoordinador() + ")", reloj.getValor());
+                    break;
+                }
                 tengoToken = true;
                 contadorMensajesToken.incrementAndGet();
                 log.registrar("TOKEN",
@@ -237,6 +281,12 @@ public class TokenRing {
     /**
      * Regenera el token. Solo el coordinador puede hacerlo.
      * Se llama cuando se detecta que el portador del token cayó.
+     *
+     * AUDITORÍA / SEGURIDAD:
+     * - Si bien esto soluciona la pérdida del token cuando el nodo poseedor muere,
+     *   existe la posibilidad de duplicar el token si el nodo viejo no ha muerto
+     *   y sólo experimenta un retraso temporal de red. Al recuperarse y reanudar
+     *   su ciclo, circulará un token fantasma.
      */
     public void regenerarToken() {
         if (nodoId == servidor.getCoordinadorId()) {

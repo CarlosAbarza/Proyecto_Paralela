@@ -45,6 +45,12 @@ public class HeartbeatManager {
 
         // Inicializar timestamps: dar gracia inicial
         long ahora = System.currentTimeMillis();
+        /*
+         * CICLO DE INICIALIZACIÓN DE TIMESTAMPS:
+         * - Qué hace: Establece el timestamp inicial de latido para todos los demás nodos del clúster
+         *   como el tiempo actual del sistema para dar una gracia inicial y evitar falsos positivos al arrancar.
+         * - De qué depende: Del número total de nodos configurados.
+         */
         for (int i = 1; i <= Config.NUM_NODOS; i++) {
             if (i != nodoId) {
                 ultimoHeartbeat.put(i, ahora);
@@ -85,6 +91,12 @@ public class HeartbeatManager {
     private void enviarHeartbeats() {
         if (!activo) return;
 
+        /*
+         * CICLO DE EMISIÓN DE LATIDOS:
+         * - Qué hace: Envía un mensaje de tipo HEARTBEAT a todos los servidores (peers) que tenemos registrados en el mapa.
+         * - Con quién se comunica: Con todos los peers activos o con socket de red conectado en el clúster.
+         * - De qué depende: De las conexiones TCP registradas en el mapa de peers.
+         */
         for (int id : servidor.getPeers().keySet()) {
             PaqueteMensaje hb = new PaqueteMensaje(
                 "Nodo" + nodoId,
@@ -104,6 +116,15 @@ public class HeartbeatManager {
 
         long ahora = System.currentTimeMillis();
 
+        /*
+         * CICLO DE AUDITORÍA DE TIMEOUT DE LATIDOS:
+         * - Qué hace: Recorre todos los nodos del clúster (excepto el propio) y verifica si el tiempo transcurrido desde su
+         *   último latido supera el límite tolerado ('Config.HEARTBEAT_TIMEOUT_MS').
+         * - Con quién se comunica: Lee datos locales de 'ultimoHeartbeat' y de 'membresia'.
+         * - De qué depende: Del número de nodos y de los valores registrados en 'ultimoHeartbeat'.
+         * - Manejo de errores/Tolerancia a fallos: Si se detecta un timeout, marca al nodo como CAIDO en el registro de membresía.
+         *   Si el nodo caído era el coordinador del clúster, invoca el callback 'onCoordinadorCaido' (iniciando una nueva elección Bully).
+         */
         for (int id = 1; id <= Config.NUM_NODOS; id++) {
             if (id == nodoId) continue;
             if (!membresia.isActivo(id)) continue; // ya está marcado como caído

@@ -1,139 +1,197 @@
-# Proyecto Final Computación Paralela y Distribuida (ICI-4344)
-## Sistema de Mensajería Instantánea Multitransparente con Coordinación, Relojes de Lamport y Tolerancia a Fallos
+# Proyecto Final: Computación Paralela y Distribuida (ICI-4344)
+## Sistema de Mensajería Instantánea Distribuido, Coordinado y Tolerante a Fallos con Relojes de Lamport
 
-Este repositorio contiene la implementación del **Proyecto Final** de la asignatura **Computación Paralela y Distribuida (ICI-4344)**. El sistema evoluciona la arquitectura cliente-servidor centralizada del Proyecto Parcial a una **topología multinodo completamente distribuida** y coordinada mediante paso de mensajes, relojes lógicos, exclusión mutua distribuida, elección y tolerancia a fallos.
+Este proyecto consiste en la evolución de una arquitectura cliente-servidor centralizada tradicional de mensajería instantánea hacia una **topología multinodo completamente distribuida (peer-to-peer/multi-servidor)**. El sistema está coordinado mediante paso de mensajes serializados, relojes lógicos de Lamport para el ordenamiento parcial de eventos, exclusión mutua distribuida basada en un Token Ring con mitigación de duplicación por épocas, algoritmos de elección de líder (Bully) y mecanismos robustos de tolerancia a fallos y sincronización de estado.
 
 ---
 
-## 🚀 Características Principales
+## 🚀 Características Principales del Sistema
 
-### 1. Topología Multinodo (P2P / Multi-Servidor)
-*   **Servidores Descentralizados**: El sistema cuenta con 3 nodos de servidor independientes (`NodoServidor 1`, `NodoServidor 2` y `NodoServidor 3`) ejecutándose en procesos/JVMs separados.
-*   **Arquitectura de Red**: Cada servidor corre un `ServerSocket` para atender a sus clientes locales (puertos `5001`, `5002` y `5003`) y otro para interconectarse con los otros servidores en un anillo/malla P2P (puertos `6001`, `6002` y `6003`).
-*   **Membresía del Clúster**: Los nodos mantienen un registro de estado dinámico (`MembresiaCluster`) sobre los peers conectados o caídos.
+### 1. Topología Multinodo Descentralizada (P2P)
+*   **Múltiples Servidores**: Consiste en 3 nodos servidores independientes ejecutándose en procesos/JVMs separados ([NodoServidor](app/src/main/java/org/example/NodoServidor.java)).
+*   **Dualidad de Sockets**: Cada nodo mantiene un `ServerSocket` para atender a sus clientes de chat locales (puertos `5001`, `5002` y `5003`) y un socket de interconexión para participar en el anillo P2P del clúster (puertos `6001`, `6002` y `6003`).
+*   **Membresía Dinámica**: A través de [MembresiaCluster.java](app/src/main/java/org/example/distributed/MembresiaCluster.java), cada nodo registra el estado conocido de sus peers (`ACTIVO`, `CAIDO` o `DESCONOCIDO`).
 
-### 2. Ordenamiento de Eventos (Relojes de Lamport)
-*   **Ausencia de Reloj Global**: La sincronización de mensajes se resuelve lógicamente mediante la implementación de **Relojes Lógicos de Lamport** (`RelojLamport.java`).
-*   **Causalidad de Eventos**: Cada envío de mensaje/coordinación realiza un `tick()` local. Al recibir un paquete, se actualiza el reloj del nodo receptor según: $L_{rec} = \max(L_{local}, L_{msg}) + 1$.
-*   **Bitácora Cronológica**: Todos los eventos (mensajes, elecciones, pasajes de token) se registran con su marca de tiempo lógica en archivos individuales dentro de la carpeta `logs/` (ej. `nodo_1_events.log`).
+### 2. Ordenamiento de Eventos y Consistencia (Relojes de Lamport)
+*   **Ausencia de Reloj Físico Global**: La ordenación lógica de los mensajes de chat y eventos del sistema se resuelve mediante **Relojes Lógicos de Lamport** ([RelojLamport.java](app/src/main/java/org/example/distributed/RelojLamport.java)), implementados con un enfoque de concurrencia optimista sin bloqueo (`AtomicInteger` y operaciones CAS).
+*   **Regla de Actualización Lógica**: Cada acción local ejecuta un `tick()`. Al recibir un mensaje, el nodo actualiza su reloj local aplicando: 
+    $$L_{local} = \max(L_{local}, L_{mensaje}) + 1$$
+*   **Bitácora Cronológica de Eventos**: Cada nodo escribe sus trazas lógicas de forma atómica en un archivo individual ([EventLog.java](app/src/main/java/org/example/distributed/EventLog.java)) bajo la ruta `logs/nodo_X.log` para permitir la auditoría de eventos.
 
-### 3. Coordinación Distribuida
-*   **Elección de Coordinador (Algoritmo Bully)**: Cuando los nodos detectan la caída del coordinador actual (mediante la pérdida de heartbeats), inician de manera autónoma una elección usando el **Algoritmo del Abusón (Bully)**. El nodo activo con el ID más alto reclama el liderazgo e informa al resto.
-*   **Exclusión Mutua (Token Ring)**: El acceso al recurso crítico simulado (`RecursoCritico.java`) se gestiona mediante un **Token Ring**. Un token único circula de forma continua entre los nodos del servidor activos (`1 ➔ 2 ➔ 3 ➔ 1`). Solo el poseedor del token puede procesar operaciones de escritura crítica.
+### 3. Exclusión Mutua Distribuida y Consistencia de Estado
+*   **Token Ring con Épocas (Term Epochs)**: El acceso exclusivo al recurso crítico ([RecursoCritico.java](app/src/main/java/org/example/distributed/RecursoCritico.java)) se coordina haciendo circular un token lógico en anillo (`1 ➔ 2 ➔ 3 ➔ 1`) gestionado por [TokenRing.java](app/src/main/java/org/example/distributed/TokenRing.java).
+    *   *Resolución de Duplicados*: Para evitar la presencia de tokens duplicados tras la sanación de particiones de red o elecciones recurrentes, se introdujo una variable `epoch` (época del coordinador). Todo token lleva estampada la época actual; si un token de una época inferior (`token.epoch < local.epoch`) llega a un nodo, se descarta y destruye automáticamente de forma segura.
+*   **Sincronización en Caliente (State Transfer)**: Cuando un servidor que estuvo caído se levanta de nuevo o se reincorpora al clúster, envía un mensaje `SYNC_REQUEST` a un peer activo. El peer responde con un `SYNC_RESPONSE` que transfiere la bitácora serializada del diccionario de comandos aprendidos de [RecursoCritico.java](app/src/main/java/org/example/distributed/RecursoCritico.java), logrando consistencia eventual instantánea.
+*   **Sintaxis Global de Aprendizaje**: Si un usuario intenta usar la función `/aprender` con argumentos incorrectos (ej. `/aprender hola`), el servidor detecta el error sintáctico y difunde un mensaje de advertencia (`WARNING`) a todos los clientes del chat global, en lugar de responder de forma privada únicamente al autor del comando.
 
-### 4. Tolerancia a Fallos Independientes
-*   **Detección por Heartbeats**: Los nodos servidores monitorean la vida del coordinador mediante el envío periódico de latidos (`HeartbeatManager.java`). Si no se recibe respuesta tras un timeout configurado, se asume la caída del nodo.
-*   **Recuperación Dinámica**: Tras un crash, el sistema se reorganiza automáticamente, disparando una elección y reconectando las rutas de comunicación activa sin detener el servicio para los clientes.
+### 4. Tolerancia a Fallos y Elección de Líder
+*   **Monitoreo por Heartbeats**: Cada servidor corre un hilo secundario coordinado por [HeartbeatManager.java](app/src/main/java/org/example/distributed/HeartbeatManager.java) que envía latidos periódicos al coordinador activo. Si expira el tiempo de espera, se declara su caída.
+*   **Algoritmo Bully (Abusón)**: Ante la caída confirmada del líder, el nodo iniciador convoca un proceso de elección a través de [AlgoritmoBully.java](app/src/main/java/org/example/distributed/AlgoritmoBully.java). El nodo activo de mayor ID es elegido, incrementa la época del coordinador (`epoch`) y difunde el nuevo liderazgo.
+*   **Apagado Administrativo Remoto**: Los servidores soportan un tipo de mensaje administrativo `SHUTDOWN` firmado por un token compartido ([Config.java](app/src/main/java/org/example/Config.java)). Esto permite forzar la caída controlada de un servidor para evaluar la resiliencia del sistema.
 
-### 5. Pruebas de Carga y Tránsito (Stress Testing)
-*   **Generador de Carga**: Un módulo especializado (`GeneradorCarga.java`) lanza de forma concurrente **50 clientes simulados** distribuidos en round-robin entre los 3 servidores por un periodo de **60 segundos**.
-*   **Métricas en Tiempo Real**: Mide el rendimiento a través de tasas de envío, latencia promedio, percentil 95 (P95), tasa de error y calcula el **tiempo de recuperación** exacto tras inducir una falla.
+### 5. Balanceador de Carga del Cliente (Client-Side Load Balancing)
+*   **Asignación de Puerto Aleatoria**: Si un cliente ([Cliente.java](app/src/main/java/org/example/Cliente.java)) o un bot ([NodoBot.java](app/src/main/java/org/example/NodoBot.java)) se inicia sin parámetros de puerto específicos, su balanceador interno escoge un puerto aleatorio de cliente activo del clúster (5001, 5002 o 5003).
+*   **Reconexión Circular**: Si el servidor al que está conectado un cliente se cae, el cliente intercepta el error e intenta reconectarse de manera transparente a los servidores restantes en orden circular, garantizando que el usuario no pierda el servicio de chat.
 
 ---
 
 ## 📁 Estructura del Código
 
-```text
-app/src/main/java/org/example/
-├── Config.java                   # Centraliza puertos, timeouts y constantes del clúster
-├── PaqueteMensaje.java           # Definición del objeto serializado estandarizado
-├── NodoServidor.java             # Motor principal del nodo servidor distribuido (reemplaza a App.java)
-├── Cliente.java                  # Cliente interactivo humano para chat y comandos
-├── NodoBot.java                  # Bot autónomo de comandos (se conecta a cualquier servidor activo)
-│
-├── distributed/                  # Módulos distribuidos del proyecto final
-│   ├── IRelojLamport.java        # Interfaz de reloj lógico
-│   ├── RelojLamport.java         # Implementación de Lamport
-│   ├── IEventLog.java            # Interfaz de registro de eventos
-│   ├── EventLog.java             # Registro en logs/nodo_X_events.log
-│   ├── ConexionPeer.java         # Gestión del socket entre servidores
-│   ├── MembresiaCluster.java     # Mantenimiento del clúster y estados
-│   ├── HeartbeatManager.java     # Envío y recepción de latidos de vida
-│   ├── AlgoritmoBully.java       # Implementación del algoritmo abusón
-│   ├── TokenRing.java            # Anillo de exclusión mutua
-│   ├── RecursoCritico.java       # Recurso compartido distribuido
-│   └── TestRelojLamport.java     # Test básico unitario del reloj
-│
-└── loadtest/                     # Módulo de pruebas de carga
-    ├── ClienteCarga.java         # Hilo que simula un cliente activo enviando spam
-    ├── RecolectorMetricas.java   # Contadores de rendimiento thread-safe
-    └── GeneradorCarga.java       # Orquestador del test de estrés multinodo
+El proyecto está estructurado dentro del módulo de Gradle `app`:
+
+*   [Config.java](app/src/main/java/org/example/Config.java): Almacena puertos de red, parámetros de timeouts de latidos, límite de historial de chat, tokens de seguridad de shutdown y constantes del clúster.
+*   [PaqueteMensaje.java](app/src/main/java/org/example/PaqueteMensaje.java): Estructura de datos serializable utilizada para todo tipo de comunicación (mensajes del chat, elecciones, tokens, sincronización de estado y apagado). Contiene la época (`epoch`) de control.
+*   [NodoServidor.java](app/src/main/java/org/example/NodoServidor.java): Orquestador y motor principal del nodo de mensajería distribuida. Maneja las conexiones P2P, los clientes locales, el procesamiento de comandos del chat (`/usuarios`, `/historial`, `/aprender`), la detección de errores de sintaxis y los mensajes `SHUTDOWN` y `SYNC`.
+*   [Cliente.java](app/src/main/java/org/example/Cliente.java): Interfaz CLI de chat interactivo que implementa balanceo de carga automático y reconexión circular tolerante a fallos.
+*   [NodoBot.java](app/src/main/java/org/example/NodoBot.java): Agente de chat inteligente autónomo. Automatiza la consulta de definiciones agregadas en el recurso crítico mediante `/aprender` y cuenta con balanceador y reconexión circular.
+*   [ClusterLauncher.java](app/src/main/java/org/example/ClusterLauncher.java): Utilidad para iniciar automáticamente Nodos 1, 2 y 3 en hilos en segundo plano, redireccionando su output a archivos de log independientes. Soporta apagado masivo ordenado con `Ctrl+C`.
+*   [ClusterControl.java](app/src/main/java/org/example/ClusterControl.java): Utilidad de apagado controlado que envía una señal TCP `SHUTDOWN` autenticada a un nodo específico.
+*   **Paquete `distributed`** (Lógica de Sistemas Distribuidos):
+    *   [IRelojLamport.java](app/src/main/java/org/example/distributed/IRelojLamport.java) & [RelojLamport.java](app/src/main/java/org/example/distributed/RelojLamport.java): Implementación del reloj lógico.
+    *   [IEventLog.java](app/src/main/java/org/example/distributed/IEventLog.java) & [EventLog.java](app/src/main/java/org/example/distributed/EventLog.java): Persistencia atómica de eventos ordenados por Lamport.
+    *   [ConexionPeer.java](app/src/main/java/org/example/distributed/ConexionPeer.java): Abstracción de un canal de comunicación de sockets bidireccional entre servidores vecinos en la malla P2P.
+    *   [MembresiaCluster.java](app/src/main/java/org/example/distributed/MembresiaCluster.java): Registro local del estado y conectividad de los nodos del clúster.
+    *   [HeartbeatManager.java](app/src/main/java/org/example/distributed/HeartbeatManager.java): Responsable de enviar señales de vida periódicas al coordinador actual y de alertar si este se desconecta.
+    *   [AlgoritmoBully.java](app/src/main/java/org/example/distributed/AlgoritmoBully.java): Orquesta la elección de un nuevo líder tras la caída del coordinador utilizando el algoritmo Bully.
+    *   [TokenRing.java](app/src/main/java/org/example/distributed/TokenRing.java): Define el flujo circular del token de exclusión mutua en la red y las reglas de validación por épocas.
+    *   [RecursoCritico.java](app/src/main/java/org/example/distributed/RecursoCritico.java): Diccionario en memoria con soporte de serialización y deserialización para la sincronización de estado entre nodos.
+    *   [TestRelojLamport.java](app/src/main/java/org/example/distributed/TestRelojLamport.java): Tests unitarios de verificación para el incremento causal de marcas de tiempo de Lamport.
+*   **Paquete `loadtest`** (Mecanismos de Pruebas de Carga):
+    *   [ClienteCarga.java](app/src/main/java/org/example/loadtest/ClienteCarga.java): Hilo cliente de simulación de estrés que registra tiempos de respuesta, errores y reconexiones.
+    *   [RecolectorMetricas.java](app/src/main/java/org/example/loadtest/RecolectorMetricas.java): Consolida los reportes del test y calcula las conexiones activas al finalizar el experimento.
+    *   [GeneradorCarga.java](app/src/main/java/org/example/loadtest/GeneradorCarga.java): Orquestador principal de la simulación. Lanza 50 clientes paralelos, induce la caída de Nodo 3 a los 30 segundos usando el mensaje administrativo `SHUTDOWN`, evalúa la reconexión y genera reportes detallados.
+
+---
+
+## 🛠️ Instrucciones de Compilación y Ejecución
+
+### 1. Compilación del Código
+Asegúrate de estar en el directorio raíz de la carpeta `Proyecto_Paralela` y ejecuta el comando de Gradle para compilar el proyecto:
+```bash
+./gradlew build -x test
 ```
 
 ---
 
-## 🛠️ Instrucciones de Ejecución
+### 2. Levantar el Clúster de Servidores
+Tienes dos opciones para levantar el clúster de servidores (Nodos 1, 2 y 3):
 
-### 1. Compilar el Proyecto
-Desde la raíz del proyecto, compila las clases de Java ejecutando:
+#### Opción A: Levantamiento Automático (Recomendado)
+Puedes iniciar todos los servidores de manera coordinada en una sola terminal ejecutando el lanzador automático:
 ```bash
-./gradlew classes
+java -cp app/build/classes/java/main org.example.ClusterLauncher
 ```
+*   **Cómo funciona**: Levanta en segundo plano los 3 procesos Java de `NodoServidor` correspondientes a los IDs 1, 2 y 3.
+*   **Logs**: La salida estándar y de error de cada nodo se redirige automáticamente a `logs/nodo_1.log`, `logs/nodo_2.log` y `logs/nodo_3.log`.
+*   **Finalización**: Presionando `Ctrl+C` en esta terminal detendrás de manera limpia y segura todos los servidores del clúster.
 
-### 2. Iniciar el Clúster de Servidores
-Para levantar el clúster multinodo de manera local, debes iniciar 3 terminales separadas, una para cada `NodoServidor`:
-
-*   **Terminal 1 (Nodo 1)**:
+#### Opción B: Levantamiento Manual (Tres terminales por separado)
+Si deseas observar la salida de consola de cada servidor en tiempo real, puedes abrir tres terminales diferentes y ejecutar:
+*   **Terminal del Nodo 1**:
     ```bash
     java -cp app/build/classes/java/main org.example.NodoServidor 1
     ```
-*   **Terminal 2 (Nodo 2)**:
+*   **Terminal del Nodo 2**:
     ```bash
     java -cp app/build/classes/java/main org.example.NodoServidor 2
     ```
-*   **Terminal 3 (Nodo 3)**:
+*   **Terminal del Nodo 3**:
     ```bash
     java -cp app/build/classes/java/main org.example.NodoServidor 3
     ```
 
-*El Nodo 3, al tener el ID más alto, se convertirá en el Coordinador inicial.*
+---
 
-### 3. Iniciar el NodoBot
-El bot autónomo puede conectarse a cualquiera de los puertos de cliente activos (puertos `5001`, `5002` o `5003`):
+### 3. Conectar Clientes Interactivos de Chat
+Para chatear en la red interactiva de mensajería distribuida, abre una o más terminales y ejecuta:
 ```bash
-java -cp app/build/classes/java/main org.example.NodoBot localhost 5003
+java -cp app/build/classes/java/main org.example.Cliente
 ```
-
-### 4. Conectar Clientes Interactivos
-Puedes abrir múltiples terminales para simular usuarios humanos chateando desde diferentes servidores. Los mensajes se replicarán a todo el clúster usando la comunicación P2P entre servidores.
-
-*   **Cliente en Servidor 1**:
+*   **Balanceo de Carga**: El cliente seleccionará un servidor activo aleatoriamente (puertos `5001`, `5002` o `5003`).
+*   **Conexión Manual**: Si deseas conectarte específicamente a un puerto determinado, pásalo como parámetro:
     ```bash
     java -cp app/build/classes/java/main org.example.Cliente localhost 5001
     ```
-*   **Cliente en Servidor 2**:
-    ```bash
-    java -cp app/build/classes/java/main org.example.Cliente localhost 5002
-    ```
+*   **Comandos en el Chat**:
+    *   `/usuarios` : Muestra los usuarios autenticados en el nodo local actual.
+    *   `/historial` : Solicita la bitácora de mensajes de chat recientes guardados en memoria.
+    *   `/aprender <termino> <definicion>` : Guarda un par clave-valor en el recurso crítico distribuido requiriendo la adquisición del Token Ring.
+    *   Cualquier otra cadena enviada se difundirá como mensaje de chat convencional a todos los nodos.
 
 ---
 
-## 📊 Demostración de Falla Inducida e Informe de Carga
-
-El sistema incluye una simulación guiada para probar la resiliencia bajo estrés.
-
-### Ejecutar el Test de Estrés
-1. Asegúrate de tener iniciados los 3 servidores (`NodoServidor 1, 2, 3`) y el `NodoBot`.
-2. Ejecuta el generador de carga desde otra terminal:
-   ```bash
-   java -cp app/build/classes/java/main org.example.loadtest.GeneradorCarga
-   ```
-3. El programa levantará **50 hilos concurrentes** enviando mensajes en round-robin.
-4. **Inducir Caída del Coordinador**: A los **~30 segundos** de la prueba, ve a la terminal del **Nodo 3** y detén el proceso forzosamente (`Ctrl+C`).
-5. Vuelve rápidamente a la terminal del `GeneradorCarga` y presiona **`ENTER`** para marcar el instante exacto de la falla.
-6. El clúster detectará la desconexión del Nodo 3 mediante la pérdida de heartbeats, disparará el algoritmo Bully en los Nodos 1 y 2, elegirá al Nodo 2 como nuevo coordinador, reactivará el Token Ring y continuará operando.
-7. Al expirar los 60 segundos, verás el reporte de métricas impreso en consola.
-
----
-
-## 📂 Archivos de Logs Generados
-Durante la ejecución, cada servidor genera una bitácora detallada con marcas de tiempo lógicas. Puedes encontrarlos en:
-*   `logs/nodo_1_events.log`
-*   `logs/nodo_2_events.log`
-*   `logs/nodo_3_events.log`
-
-Ejemplo de línea de Log con Reloj de Lamport:
-```text
-[Reloj Lamport: 142] - [Fallas] - [HEARTBEAT] - Enviando heartbeat a coordinador
-[Reloj Lamport: 145] - [TOKEN] - [TOKEN_PASS] - Token recibido. Ejecutando cola...
+### 4. Iniciar el Bot Autónomo
+Puedes iniciar el agente inteligente autónomo para comprobar el procesamiento automatizado del clúster:
+```bash
+java -cp app/build/classes/java/main org.example.NodoBot
 ```
+*   Igual que el cliente, el bot cuenta con balanceador de carga automático e intentará conectarse a cualquiera de los nodos disponibles y cambiará de nodo en caliente si este es dado de baja.
+
+---
+
+## 📊 Pruebas de Carga y Resiliencia Automatizadas
+
+El proyecto incluye un arnés de simulación de estrés diseñado para evaluar de forma autónoma el rendimiento y la tolerancia a fallos del clúster bajo condiciones intensivas:
+
+1.  **Iniciar servidores**: Levanta el clúster con la Opción A (`ClusterLauncher`).
+2.  **Iniciar la Prueba**: En otra terminal, ejecuta:
+    ```bash
+    java -cp app/build/classes/java/main org.example.loadtest.GeneradorCarga
+    ```
+3.  **Ciclo de Vida de la Simulación (60 segundos)**:
+    *   El generador crea **50 clientes de carga concurrentes** ([ClienteCarga.java](app/src/main/java/org/example/loadtest/ClienteCarga.java)).
+    *   Estos clientes bombardean con mensajes y consultas a los tres servidores activos distribuyendo la carga de manera aleatoria.
+    *   A los **30 segundos de ejecución**, el generador envía automáticamente un comando administrativo de `SHUTDOWN` al coordinador (Nodo 3).
+    *   El clúster detecta la desconexión del coordinador, convoca elecciones de inmediato con el algoritmo Bully, asigna un nuevo coordinador, incrementa la época del token a `epoch = 4` y descarta los tokens antiguos.
+    *   Los clientes que estaban conectados a Nodo 3 interceptan la falla del socket, buscan un nuevo nodo vivo (Nodo 1 o 2) y se reconectan de manera transparente.
+    *   A los **55 segundos**, el generador toma un snapshot del estado de la red para contar cuántos clientes siguen conectados.
+    *   A los **60 segundos**, detiene los hilos y genera un resumen de métricas en la consola y en el archivo `logs/reporte_carga.txt`.
+
+El reporte final mostrará:
+*   **Throughput (resp/s)** y **Latencia promedio (ms)**.
+*   **Tiempo de Recuperación del Clúster (ms)** tras la caída del coordinador.
+*   **Conexiones de Clientes Esperadas vs Reales** para validar que la reconexión distribuida haya funcionado al 100%.
+
+---
+
+## 🔧 Simulación y Pruebas de Falla Manuales
+
+Si prefieres realizar una auditoría de fallas y recuperaciones de forma interactiva y paso a paso:
+
+### 1. Provocar la caída de un Nodo Servidor
+Usa la herramienta [ClusterControl.java](app/src/main/java/org/example/ClusterControl.java) indicando el identificador del nodo que quieres dar de baja (por ejemplo, el Nodo 3):
+```bash
+java -cp app/build/classes/java/main org.example.ClusterControl 3
+```
+*   Esto enviará el paquete `SHUTDOWN` autenticado al puerto de clientes de dicho nodo, provocando un cierre seguro de sockets y la finalización controlada de su hilo de ejecución.
+
+### 2. Comprobar la resiliencia en Caliente
+Observa cómo los clientes que estaban en la Terminal de chat conectados al Nodo 3 inician su algoritmo de reintentos circulares y se mudan automáticamente al Nodo 1 o Nodo 2, imprimiendo logs de reconexión.
+Al mismo tiempo, los nodos restantes iniciarán elecciones Bully para designar el nuevo coordinador y reestablecer el paso del token.
+
+### 3. Recuperar el Nodo Caído (Sincronización de Estado)
+Vuelve a levantar el Nodo 3 en otra terminal:
+```bash
+java -cp app/build/classes/java/main org.example.NodoServidor 3
+```
+*   **Sincronización Automática**: Durante su inicio, Nodo 3 se conectará con los nodos activos, enviará un mensaje `SYNC_REQUEST` y recibirá un `SYNC_RESPONSE` con todas las definiciones del diccionario aprendidas mientras estuvo fuera de línea.
+*   **Reingreso al Anillo**: El nodo recuperado es reinsertado dinámicamente al flujo circular del token de exclusión mutua.
+
+---
+
+## 📝 Formato de Logs del Clúster
+
+Los logs en `logs/nodo_X.log` siguen la convención cronológica ordenada lógicamente por Lamport:
+
+```text
+[2026-06-09 13:30:10.150][L:12][NODO:3][SISTEMA] NodoServidor 3 iniciado en puerto clientes 5003
+[2026-06-09 13:30:40.220][L:82][NODO:1][BULLY] Elección iniciada localmente
+[2026-06-09 13:30:44.935][L:95][NODO:2][TOKEN] Token OBSOLETO descartado (token epoch: 0, local: 4)
+[2026-06-09 13:30:44.936][L:96][NODO:2][TOKEN] Token inicial creado en Nodo 2 (coordinador, época: 4)
+```
+
+Las trazas indican:
+*   `[2026-06-09 13:30:10.150]`: Marca de tiempo real del host.
+*   `[L:12]`: Marca de tiempo lógica del **Reloj de Lamport** del nodo en ese instante de evento.
+*   `[NODO:X]`: Identificador del servidor que registra el evento.
+*   `[SISTEMA / BULLY / TOKEN / CONEXION]`: Etiqueta del módulo del sistema distribuido.

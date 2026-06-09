@@ -14,6 +14,8 @@ public class RecolectorMetricas {
     private final AtomicLong totalRespuestas = new AtomicLong(0);
     private final AtomicLong totalErrores = new AtomicLong(0);
     private final List<Double> latencias = Collections.synchronizedList(new ArrayList<>());
+    private final AtomicInteger clientesActivos = new AtomicInteger(0);
+    private volatile int conexionesFinales = 0;
 
     private long inicioMs;
     private long finMs;
@@ -56,6 +58,22 @@ public class RecolectorMetricas {
         latencias.add(ms);
     }
 
+    public void registrarConexion() {
+        clientesActivos.incrementAndGet();
+    }
+
+    public void registrarDesconexion() {
+        clientesActivos.decrementAndGet();
+    }
+
+    public void capturarConexionesFinales() {
+        conexionesFinales = clientesActivos.get();
+    }
+
+    public int getConexionesFinales() {
+        return conexionesFinales;
+    }
+
     public void marcarFalla() {
         timestampFalla = System.currentTimeMillis();
         System.out.println("\n⚠️  FALLA INDUCIDA marcada a T=" + timestampFalla);
@@ -72,6 +90,11 @@ public class RecolectorMetricas {
         synchronized (latencias) {
             if (latencias.isEmpty()) return 0;
             double suma = 0;
+            /*
+             * CICLO DE CÁLCULO DE LATENCIA PROMEDIO:
+             * - Qué hace: Recorre la lista de latencias y suma sus valores.
+             * - De qué depende: De la lista local 'latencias' poblada dinámicamente por los hilos de los clientes.
+             */
             for (double l : latencias) suma += l;
             return suma / latencias.size();
         }
@@ -119,6 +142,14 @@ public class RecolectorMetricas {
             System.out.println("──────────────────────────────────────────────────");
             System.out.printf("  Tiempo recup.:     %d ms%n", getTiempoRecuperacionMs());
         }
+        System.out.println("──────────────────────────────────────────────────");
+        System.out.printf("  Clientes esperados:                       %d%n", org.example.Config.CARGA_NUM_CLIENTES);
+        System.out.printf("  Clientes conectados reales (al finalizar): %d%n", conexionesFinales);
+        if (conexionesFinales == org.example.Config.CARGA_NUM_CLIENTES) {
+            System.out.println("  ✓ ¡ÉXITO DE RECONEXIÓN! Todos los clientes terminaron conectados (100% de reconexión).");
+        } else {
+            System.out.printf("  ❌ ¡PÉRDIDA DE CONEXIONES! Faltaron %d clientes por reconectarse.%n", (org.example.Config.CARGA_NUM_CLIENTES - conexionesFinales));
+        }
         System.out.println("══════════════════════════════════════════════════");
     }
 
@@ -153,6 +184,11 @@ public class RecolectorMetricas {
                     pw.println("Timestamp recuperación:" + timestampRecuperacion);
                     pw.println("Tiempo recuperación:   " + getTiempoRecuperacionMs() + " ms");
                 }
+                pw.println();
+                pw.println("--- Reconexión ---");
+                pw.println("Clientes esperados:                        " + org.example.Config.CARGA_NUM_CLIENTES);
+                pw.println("Clientes conectados reales (al finalizar): " + conexionesFinales);
+                pw.println("Tasa de reconexión exitosa:                " + String.format("%.2f", (conexionesFinales * 100.0) / org.example.Config.CARGA_NUM_CLIENTES) + "%");
                 pw.println();
                 pw.println("=================================");
 

@@ -5,6 +5,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
@@ -50,6 +51,7 @@ public class NodoServidor {
 
     // ID del coordinador actual (Fases 3 y 5)
     private volatile int coordinadorId;
+    private final AtomicInteger epochCoordinador = new AtomicInteger(1);
 
     // Callback para mensajes peer de coordinación (Fases 3, 4, 5)
     private volatile Consumer<PaqueteMensaje> onMensajePeer;
@@ -129,6 +131,14 @@ public class NodoServidor {
         try (ServerSocket serverSocket = new ServerSocket(puertoClientes)) {
             log.registrar("INICIO", "Escuchando clientes en puerto " + puertoClientes, reloj.tick());
 
+            /*
+             * CICLO DE ACEPTACIÓN DE CLIENTES:
+             * - Qué hace: Escucha de forma continua conexiones entrantes de clientes (usuarios del chat) en el puerto de clientes local.
+             * - Con quién se comunica: Con los clientes de chat (instancias de Cliente) que se conectan a este nodo.
+             * - De qué depende: Depende de la disponibilidad del puerto del sistema y de que el hilo principal inicie este servicio.
+             * - Manejo de errores: Si falla el socket al aceptar una conexión específica, se captura la excepción. Si hay un
+             *   fallo catastrófico en el ServerSocket externo, finaliza la aceptación de nuevos clientes pero no tumba al servidor completo.
+             */
             while (true) {
                 Socket socket = serverSocket.accept();
                 log.registrar("CONEXION", "Nueva conexión de cliente desde " + socket.getInetAddress(), reloj.tick());
@@ -161,6 +171,15 @@ public class NodoServidor {
 
                 if (!autenticar(in)) return;
 
+                /*
+                 * CICLO DE LECTURA DE MENSAJES DEL CLIENTE:
+                 * - Qué hace: Lee de forma contínua y bloqueante paquetes serializados enviados por el cliente.
+                 * - Con quién se comunica: Con el cliente TCP remoto asignado a este manejador.
+                 * - De qué depende: De la validez de la sesión autenticada y de la estabilidad de la conexión TCP.
+                 * - Manejo de errores/Reconexión: Captura IOException o ClassNotFoundException si el cliente se desconecta
+                 *   o envía datos corruptos, finalizando el ciclo. En el bloque 'finally' se liberan los recursos y se
+                 *   limpia al cliente de la lista activa del nodo. La reconexión es responsabilidad del Cliente.
+                 */
                 while (true) {
                     Object recibido = in.readObject();
                     if (!(recibido instanceof PaqueteMensaje)) {
@@ -204,6 +223,16 @@ public class NodoServidor {
                 return false;
             }
 
+            /*
+             * AUDITORÍA / DETECCIÓN DE COMPORTAMIENTO:
+             * - No se realiza validación de unicidad de nombre de usuario (username uniqueness)
+             *   ni a nivel local del nodo ni a nivel global de clúster.
+             * - Si un usuario inicia sesión con un nombre idéntico al de otro usuario conectado,
+             *   ambas conexiones coexistirán de manera silenciosa. Esto puede provocar ambigüedades en la
+             *   identificación de remitentes e inconsistencias en la notificación de salida.
+             * - MEJORA: Validar localmente contra la lista 'clientesLocales' y replicar la consulta en el clúster.
+             */
+
             nombreAsignado = nombre;
             log.registrar("AUTH", "Usuario autenticado: " + nombreAsignado, reloj.tick());
 
@@ -231,6 +260,16 @@ public class NodoServidor {
         }
 
         private void procesarMensaje(PaqueteMensaje mensajeRecibido) {
+            // Manejar apagado administrativo remoto
+            if (mensajeRecibido.getTipo() == PaqueteMensaje.Tipo.SHUTDOWN) {
+                if (Config.TOKEN_VALIDO.equals(mensajeRecibido.getContenido())) {
+                    log.registrar("SISTEMA", "Recibida señal de APAGADO administrativo local. Apagando...", reloj.tick());
+                    log.flush();
+                    System.out.println("[NODO " + nodoId + "] Recibida señal de APAGADO administrativo. Deteniendo...");
+                    System.exit(0);
+                }
+            }
+
             String contenido = mensajeRecibido.getContenido();
 
             if (contenido == null || contenido.trim().isEmpty()) {
@@ -255,9 +294,9 @@ public class NodoServidor {
             }
 
             // Comando /aprender → requiere exclusión mutua (token ring)
-            if (contenido.startsWith("/aprender ") && tokenRing != null) {
+            if (contenido.startsWith("/aprender") && tokenRing != null) {
                 String[] partes = contenido.split(" ", 3);
-                if (partes.length >= 3) {
+                if (contenido.startsWith("/aprender ") && partes.length >= 3) {
                     String nuevoCmd = partes[1].toLowerCase();
                     String respuestaCmd = partes[2];
 
@@ -289,6 +328,16 @@ public class NodoServidor {
                             "Error: no se pudo obtener acceso exclusivo para aprender.",
                             PaqueteMensaje.Tipo.SISTEMA));
                     }
+                    return;
+                } else {
+                    // Difundir error global de sintaxis (según feedback L54 del plan de implementación)
+                    PaqueteMensaje errGlobal = new PaqueteMensaje("Servidor",
+                        "Uso incorrecto del comando de aprendizaje. Formato: /aprender /comando respuesta",
+                        PaqueteMensaje.Tipo.SISTEMA);
+                    errGlobal.setLamportTimestamp(reloj.tick());
+                    errGlobal.setNodoOrigenId(nodoId);
+                    difundirLocal(errGlobal);
+                    replicarAPeers(errGlobal);
                     return;
                 }
             }
@@ -338,6 +387,13 @@ public class NodoServidor {
             }
         }
 
+        /*
+         * AUDITORÍA / DETECCIÓN DE COMPORTAMIENTO:
+         * - La lista de usuarios devuelta es LOCAL a este servidor (NodoServidor).
+         * - Los usuarios conectados a otros nodos del clúster no se listan aquí.
+         * - MEJORA: Para un sistema totalmente distribuido, se debería implementar una consulta P2P
+         *   o mantener un estado global compartido de membresía de usuarios conectados en todo el clúster.
+         */
         private void enviarListaUsuarios() {
             List<String> nombres = new ArrayList<>();
             for (ClienteInfo info : clientesLocales) {
@@ -347,6 +403,13 @@ public class NodoServidor {
                     "Usuarios en Nodo " + nodoId + ": " + nombres, PaqueteMensaje.Tipo.SISTEMA));
         }
 
+        /*
+         * AUDITORÍA / DETECCIÓN DE COMPORTAMIENTO:
+         * - El historial devuelto es LOCAL a la cola 'historial' de esta instancia de servidor.
+         * - Aunque los mensajes se replican activamente entre nodos, un nodo recién ingresado o recuperado
+         *   no tendrá los mensajes antiguos dado que no se realiza sincronización del historial al iniciar.
+         * - MEJORA: Solicitar el historial reciente a un peer activo durante la inicialización.
+         */
         private void enviarHistorial() {
             List<PaqueteMensaje> copia = new ArrayList<>(historial);
             if (copia.isEmpty()) {
@@ -383,6 +446,14 @@ public class NodoServidor {
         try (ServerSocket serverSocket = new ServerSocket(puertoPeers)) {
             log.registrar("INICIO", "Escuchando peers en puerto " + puertoPeers, reloj.tick());
 
+            /*
+             * CICLO DE ACEPTACIÓN DE CONEXIONES PEER:
+             * - Qué hace: Escucha y acepta continuamente solicitudes de conexión TCP de otros nodos servidores (peers) del cluster.
+             * - Con quién se comunica: Con otros nodos de mayor ID que inician una conexión TCP hacia nosotros.
+             * - De qué depende: Del ServerSocket en 'puertoPeers' y de un handshake inicial correcto de identificación.
+             * - Manejo de errores: Si ocurre un fallo durante el handshake o accept, se registra el error y la conexión
+             *   se aborta de forma segura sin interrumpir la escucha de futuras conexiones peer.
+             */
             while (true) {
                 Socket socket = serverSocket.accept();
                 ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
@@ -409,6 +480,14 @@ public class NodoServidor {
 
                 log.registrar("PEER", "Conexión peer aceptada de Nodo " + peerNodoId, reloj.tick());
 
+                // Solicitar sincronización de estado (comandos aprendidos) al nuevo peer
+                PaqueteMensaje syncReq = new PaqueteMensaje(
+                    "Nodo" + nodoId,
+                    "",
+                    PaqueteMensaje.Tipo.SYNC_REQUEST
+                );
+                enviarAPeer(peerNodoId, syncReq);
+
                 // Iniciar hilo listener para este peer
                 new Thread(() -> escucharPeer(peerNodoId, conexion), "PeerListener-" + peerNodoId).start();
             }
@@ -431,6 +510,16 @@ public class NodoServidor {
     private void conectarAPeerConReintentos(int peerId) {
         int peerPuerto = Config.getPuertoPeers(peerId);
 
+        /*
+         * CICLO DE REINTENTO DE CONEXIÓN CON PEER:
+         * - Qué hace: Intenta continuamente establecer conexión saliente con un peer de ID menor.
+         * - Con quién se comunica: Con el nodo remoto de ID 'peerId'.
+         * - De qué depende: De la disponibilidad de red y de que el nodo destino esté activo y escuchando en 'peerPuerto'.
+         * - Manejo de errores y reconexiones: Si falla la conexión o el handshake (IOException/ClassNotFoundException),
+         *   se registra el error, se duerme el hilo por 3 segundos y se vuelve a intentar de forma indefinida.
+         *   Si se conecta con éxito, llama a escucharPeer (bloqueante). Si escucharPeer finaliza por desconexión,
+         *   el ciclo while continuará intentando reconectarse.
+         */
         while (true) {
             try {
                 Socket socket = new Socket(host, peerPuerto);
@@ -456,9 +545,17 @@ public class NodoServidor {
 
                 log.registrar("PEER", "Conectado a Nodo " + peerId + " (puerto " + peerPuerto + ")", reloj.tick());
 
+                // Solicitar sincronización de estado al conectar
+                PaqueteMensaje syncReq = new PaqueteMensaje(
+                    "Nodo" + nodoId,
+                    "",
+                    PaqueteMensaje.Tipo.SYNC_REQUEST
+                );
+                enviarAPeer(peerId, syncReq);
+
                 // Iniciar hilo listener
                 escucharPeer(peerId, conexion);
-                break;  // Si escucharPeer termina, el peer cayó
+                // Si la conexión se pierde en escucharPeer, el flujo vuelve aquí y se reintentará conectar.
 
             } catch (IOException | ClassNotFoundException e) {
                 log.registrar("PEER", "No se pudo conectar a Nodo " + peerId + ", reintentando en 3s...", reloj.getValor());
@@ -472,6 +569,14 @@ public class NodoServidor {
      */
     private void escucharPeer(int peerId, ConexionPeer conexion) {
         try {
+            /*
+             * CICLO DE LECTURA DE PEER:
+             * - Qué hace: Lee continuamente los mensajes serializados provenientes de un peer específico.
+             * - Con quién se comunica: Con el peer especificado por 'peerId'.
+             * - De qué depende: De la estabilidad del socket de red establecido.
+             * - Manejo de errores/Desconexión: Si falla la lectura por corte de red (IOException) o desajuste de clases,
+             *   se registra el evento de desconexión, se elimina de la lista de peers y se marca como caído.
+             */
             while (conexion.isConectado()) {
                 PaqueteMensaje mensaje = conexion.recibir();
                 onMensajeDePeer(mensaje, peerId);
@@ -545,6 +650,32 @@ public class NodoServidor {
                 } else {
                     log.registrar("WARN", "Mensaje " + mensaje.getTipo() + " recibido pero no hay handler registrado", reloj.getValor());
                 }
+                break;
+
+            case SHUTDOWN:
+                if (Config.TOKEN_VALIDO.equals(mensaje.getContenido())) {
+                    log.registrar("SISTEMA", "Recibida señal de APAGADO administrativo de peer. Apagando...", reloj.tick());
+                    log.flush();
+                    System.out.println("[NODO " + nodoId + "] Recibida señal de APAGADO administrativo de peer. Deteniendo...");
+                    System.exit(0);
+                }
+                break;
+
+            case SYNC_REQUEST:
+                // Responder al solicitante con el contenido de la memoria serializado
+                PaqueteMensaje syncResp = new PaqueteMensaje(
+                    "Nodo" + nodoId,
+                    recursoCritico.serializarComandos(),
+                    PaqueteMensaje.Tipo.SYNC_RESPONSE
+                );
+                enviarAPeer(peerOrigenId, syncResp);
+                log.registrar("SYNC", "Enviada copia de comandos a Nodo " + peerOrigenId, reloj.getValor());
+                break;
+
+            case SYNC_RESPONSE:
+                // Cargar comandos recibidos en el recurso crítico
+                recursoCritico.deserializarComandos(mensaje.getContenido());
+                log.registrar("SYNC", "Comandos recibidos y sincronizados desde Nodo " + peerOrigenId, reloj.getValor());
                 break;
 
             default:
@@ -658,8 +789,13 @@ public class NodoServidor {
     public int getCoordinadorId() { return coordinadorId; }
     public void setCoordinadorId(int id) {
         this.coordinadorId = id;
-        log.registrar("COORDINADOR", "Coordinador actualizado a Nodo " + id, reloj.tick());
+        if (id == nodoId) {
+            epochCoordinador.incrementAndGet();
+        }
+        log.registrar("COORDINADOR", "Coordinador actualizado a Nodo " + id + " (época " + epochCoordinador.get() + ")", reloj.tick());
     }
+    public int getEpochCoordinador() { return epochCoordinador.get(); }
+    public void setEpochCoordinador(int epoch) { this.epochCoordinador.set(epoch); }
     public RelojLamport getReloj() { return reloj; }
     public EventLog getLog() { return log; }
     public MembresiaCluster getMembresia() { return membresia; }
@@ -685,10 +821,14 @@ public class NodoServidor {
             case ELECTION:
             case ELECTION_OK:
             case COORDINATOR:
+                int nuevaEpoca = mensaje.getEpoch();
                 algoritmoBully.procesarMensaje(mensaje);
                 // Si recibimos COORDINATOR, verificar si debemos regenerar o invalidar token
                 if (mensaje.getTipo() == PaqueteMensaje.Tipo.COORDINATOR) {
                     int nuevoCoord = Integer.parseInt(mensaje.getContenido());
+                    if (nuevoCoord != nodoId) {
+                        setEpochCoordinador(nuevaEpoca);
+                    }
                     if (nuevoCoord == nodoId) {
                         // Somos el nuevo coordinador → regenerar token
                         tokenRing.regenerarToken();

@@ -37,6 +37,7 @@ public class ClienteCarga implements Runnable {
     @Override
     public void run() {
         Socket socket = null;
+        boolean conectado = false;
         try {
             // 1. Conectar
             socket = new Socket(host, puerto);
@@ -53,6 +54,9 @@ public class ClienteCarga implements Runnable {
                     PaqueteMensaje.Tipo.LOGIN));
             out.flush();
 
+            conectado = true;
+            metricas.registrarConexion();
+
             // 3. Consumir mensaje de bienvenida + historial
             consumirMensajesIniciales(in);
 
@@ -65,6 +69,13 @@ public class ClienteCarga implements Runnable {
             long fin = System.currentTimeMillis() + (duracionSegundos * 1000L);
             int contador = 0;
 
+            /*
+             * CICLO DE ENVÍO DE MENSAJES DE PRUEBA:
+             * - Qué hace: Envía ráfagas de mensajes de prueba de manera constante durante el tiempo de duración definido.
+             * - Con quién se comunica: Con el nodo servidor de clúster al que está conectado.
+             * - De qué depende: De la bandera 'activo' y del temporizador del sistema para no sobrepasar la duración de la prueba.
+             * - Manejo de errores: Si falla el envío (IOException), registra el error en las métricas colectivas y aborta el ciclo.
+             */
             while (System.currentTimeMillis() < fin && activo) {
                 long t0 = System.nanoTime();
 
@@ -100,6 +111,9 @@ public class ClienteCarga implements Runnable {
             metricas.registrarError();
         } finally {
             activo = false;
+            if (conectado) {
+                metricas.registrarDesconexion();
+            }
             if (socket != null) {
                 try { socket.close(); } catch (IOException e) { /* ignorar */ }
             }
@@ -144,6 +158,14 @@ public class ClienteCarga implements Runnable {
      * Loop de recepción de respuestas. Corre en hilo daemon.
      */
     private void recibirRespuestas(ObjectInputStream in) {
+        /*
+         * CICLO DE ESCUCHA DE RESPUESTAS EN PRUEBA DE CARGA:
+         * - Qué hace: Lee en segundo plano todos los mensajes provenientes del servidor para medir las respuestas.
+         * - Con quién se comunica: Con el NodoServidor al que está conectado.
+         * - De qué depende: De la validez de la conexión y de que 'activo' sea verdadero.
+         * - Manejo de errores: Si ocurre SocketTimeoutException, continúa escuchando. Si ocurre otra excepción,
+         *   registra el error y rompe el ciclo finalizando el hilo.
+         */
         while (activo) {
             try {
                 Object obj = in.readObject();

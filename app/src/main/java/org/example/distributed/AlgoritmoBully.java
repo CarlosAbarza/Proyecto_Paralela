@@ -46,6 +46,12 @@ public class AlgoritmoBully {
 
         // Enviar ELECTION a todos los nodos con ID mayor
         boolean envioAlguno = false;
+        /*
+         * CICLO DE BÚSQUEDA Y MENSAJE DE ELECCIÓN:
+         * - Qué hace: Envía un mensaje de tipo ELECTION a todos los nodos del clúster que tengan un ID mayor que el nuestro.
+         * - Con quién se comunica: Con los servidores (peers) del clúster con ID superior que estén activos o cuyo estado sea desconocido.
+         * - De qué depende: Del estado del registro de membresía y de que las conexiones peer correspondientes estén configuradas.
+         */
         for (int id = nodoId + 1; id <= Config.NUM_NODOS; id++) {
             if (servidor.getMembresia().isActivo(id) || 
                 servidor.getMembresia().getEstado(id) == MembresiaCluster.EstadoNodo.DESCONOCIDO) {
@@ -165,6 +171,7 @@ public class AlgoritmoBully {
             String.valueOf(nodoId),
             PaqueteMensaje.Tipo.COORDINATOR
         );
+        coordinator.setEpoch(servidor.getEpochCoordinador());
         servidor.enviarATodosPeers(coordinator);
     }
 

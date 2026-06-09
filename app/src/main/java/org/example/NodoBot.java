@@ -18,20 +18,35 @@ public class NodoBot {
 
     public static void main(String[] args) {
         String host = args.length > 0 ? args[0] : "localhost";
-        int puertoInicial = args.length > 1 ? Integer.parseInt(args[1]) : Config.PUERTO_CLIENTES_NODO_1;
+        int puertoInicial = args.length > 1 ? Integer.parseInt(args[1]) : -1;
 
         int nodoActual = -1;
-        for (int i = 1; i <= Config.NUM_NODOS; i++) {
-            if (Config.getPuertoClientes(i) == puertoInicial) {
-                nodoActual = i;
-                break;
+        if (puertoInicial != -1) {
+            for (int i = 1; i <= Config.NUM_NODOS; i++) {
+                if (Config.getPuertoClientes(i) == puertoInicial) {
+                    nodoActual = i;
+                    break;
+                }
             }
+        } else {
+            // Balanceador de carga: elegir un nodo inicial al azar
+            nodoActual = new java.util.Random().nextInt(Config.NUM_NODOS) + 1;
+            System.out.println("[BALANCEADOR] Seleccionando de forma aleatoria el Nodo " + nodoActual + " para el bot.");
         }
 
         boolean primerIntento = true;
         int intentosFallidosConsecutivos = 0;
         int maxIntentos = 2 * Config.NUM_NODOS;
 
+        /*
+         * CICLO PRINCIPAL DE CONEXIÓN Y REINTENTOS DEL BOT:
+         * - Qué hace: Intenta establecer conexión con uno de los servidores del clúster de forma circular.
+         * - Con quién se comunica: Con el NodoServidor en el puerto de clientes asignado.
+         * - De qué depende: De la disponibilidad de red, del host y de que al menos un servidor del clúster esté activo.
+         * - Manejo de errores y reconexión: Si se pierde la conexión o no se puede conectar (IOException), cierra los
+         *   streams y el socket, duerme 3 segundos e intenta con el siguiente nodo del clúster (1 -> 2 -> 3 -> 1).
+         *   Si se agotan 'maxIntentos' (2 vueltas completas), el bot se apaga liberando el pool de hilos de comandos.
+         */
         while (true) {
             int puerto;
             if (primerIntento && nodoActual == -1) {
@@ -65,6 +80,16 @@ public class NodoBot {
                 primerIntento = false;
                 intentosFallidosConsecutivos = 0; // Resetear al conectar exitosamente
 
+                /*
+                 * CICLO DE LECTURA Y ENRUTAMIENTO DE MENSAJES DEL BOT:
+                 * - Qué hace: Recibe continuamente paquetes del servidor. Si el paquete es un comando (o réplica de comando)
+                 *   y no fue enviado por el propio bot, delega su procesamiento asíncrono a un pool de hilos dedicado.
+                 *   Esto evita bloquear la lectura principal del canal.
+                 * - Con quién se comunica: Con el servidor al que está conectado para recibir mensajes de chat.
+                 * - De qué depende: De que la conexión de red permanezca abierta.
+                 * - Manejo de errores: Si ocurre un ClassNotFoundException, se reporta y continúa. Si ocurre una IOException,
+                 *   el error se propaga hacia el try externo para que el bot inicie su proceso de reconexión.
+                 */
                 while (true) {
                     try {
                         PaqueteMensaje mensaje = (PaqueteMensaje) in.readObject();

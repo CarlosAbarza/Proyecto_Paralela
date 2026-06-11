@@ -36,52 +36,58 @@ public class ClienteCarga implements Runnable {
 
     @Override
     public void run() {
-        Socket socket = null;
-        boolean conectado = false;
-        try {
-            // 1. Conectar
-            socket = new Socket(host, puerto);
-            socket.setSoTimeout(5000); // timeout de lectura 5s
-            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-            out.flush();
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+        int puertoActual = this.puerto;
+        long fin = System.currentTimeMillis() + (duracionSegundos * 1000L);
+        int contador = 0;
 
-            // 2. Autenticar
-            out.writeObject(new PaqueteMensaje("auth", Config.TOKEN_VALIDO,
-                    PaqueteMensaje.Tipo.AUTH));
-            out.flush();
-            out.writeObject(new PaqueteMensaje(nombre, "LOGIN",
-                    PaqueteMensaje.Tipo.LOGIN));
-            out.flush();
+        /*
+         * CICLO PRINCIPAL DE CONEXIÓN Y RECONEXIÓN:
+         * - Qué hace: Intenta mantener una sesión activa con algún servidor del clúster de forma circular.
+         * - Con quién se comunica: Con los servidores del clúster.
+         * - De qué depende: De la bandera 'activo' y del temporizador de finalización de la prueba.
+         * - Manejo de errores/Reconexión: Si la conexión falla o se corta, captura el error, decrementa el contador de
+         *   conexión activa, rota circularmente el puerto al siguiente nodo del clúster, espera 3 segundos y reintenta.
+         */
+        while (System.currentTimeMillis() < fin && activo) {
+            Socket socket = null;
+            ObjectOutputStream out = null;
+            ObjectInputStream in = null;
+            boolean conectado = false;
 
-            conectado = true;
-            metricas.registrarConexion();
+            try {
+                // 1. Conectar
+                socket = new Socket(host, puertoActual);
+                socket.setSoTimeout(5000); // timeout de lectura 5s
+                out = new ObjectOutputStream(socket.getOutputStream());
+                out.flush();
+                in = new ObjectInputStream(socket.getInputStream());
 
-            // 3. Consumir mensaje de bienvenida + historial
-            consumirMensajesIniciales(in);
+                // 2. Autenticar
+                out.writeObject(new PaqueteMensaje("auth", Config.TOKEN_VALIDO,
+                        PaqueteMensaje.Tipo.AUTH));
+                out.flush();
+                out.writeObject(new PaqueteMensaje(nombre, "LOGIN",
+                        PaqueteMensaje.Tipo.LOGIN));
+                out.flush();
 
-            // 4. Hilo receptor: consume respuestas y cuenta
-            Thread receptor = new Thread(() -> recibirRespuestas(in), "Receptor-" + nombre);
-            receptor.setDaemon(true);
-            receptor.start();
+                conectado = true;
+                metricas.registrarConexion();
 
-            // 5. Enviar mensajes durante duracionSegundos
-            long fin = System.currentTimeMillis() + (duracionSegundos * 1000L);
-            int contador = 0;
+                // 3. Consumir mensaje de bienvenida + historial
+                consumirMensajesIniciales(in);
 
-            /*
-             * CICLO DE ENVÍO DE MENSAJES DE PRUEBA:
-             * - Qué hace: Envía ráfagas de mensajes de prueba de manera constante durante el tiempo de duración definido.
-             * - Con quién se comunica: Con el nodo servidor de clúster al que está conectado.
-             * - De qué depende: De la bandera 'activo' y del temporizador del sistema para no sobrepasar la duración de la prueba.
-             * - Manejo de errores: Si falla el envío (IOException), registra el error en las métricas colectivas y aborta el ciclo.
-             */
-            while (System.currentTimeMillis() < fin && activo) {
-                long t0 = System.nanoTime();
+                // 4. Hilo receptor: consume respuestas y cuenta
+                final ObjectInputStream inFinal = in;
+                Thread receptor = new Thread(() -> recibirRespuestas(inFinal), "Receptor-" + nombre);
+                receptor.setDaemon(true);
+                receptor.start();
 
-                PaqueteMensaje msg = crearMensaje(contador);
+                // 5. Enviar mensajes durante duracionSegundos
+                while (System.currentTimeMillis() < fin && activo) {
+                    long t0 = System.nanoTime();
 
-                try {
+                    PaqueteMensaje msg = crearMensaje(contador);
+
                     synchronized (out) {
                         out.writeObject(msg);
                         out.flush();
@@ -95,29 +101,48 @@ public class ClienteCarga implements Runnable {
                     // prueba de carga dado el modelo asíncrono del chat.
                     metricas.registrarLatencia((t1 - t0) / 1_000_000.0);
                     metricas.registrarEnvio();
-                } catch (IOException e) {
-                    metricas.registrarError();
-                    // Intentar reconectar o abandonar
-                    break;
+
+                    contador++;
+
+                    // ~10 mensajes/segundo por cliente → 500 msg/s total con 50 clientes
+                    Thread.sleep(100);
                 }
 
-                contador++;
-
-                // ~10 mensajes/segundo por cliente → 500 msg/s total con 50 clientes
-                Thread.sleep(100);
+            } catch (Exception e) {
+                if (activo) {
+                    metricas.registrarError();
+                }
+            } finally {
+                if (conectado) {
+                    metricas.registrarDesconexion();
+                }
+                if (socket != null) {
+                    try { socket.close(); } catch (IOException e) { /* ignorar */ }
+                }
             }
 
-        } catch (Exception e) {
-            metricas.registrarError();
-        } finally {
-            activo = false;
-            if (conectado) {
-                metricas.registrarDesconexion();
-            }
-            if (socket != null) {
-                try { socket.close(); } catch (IOException e) { /* ignorar */ }
+            // Si se cayó la conexión pero queda tiempo, rotar puerto y esperar antes de reintentar
+            if (System.currentTimeMillis() < fin && activo) {
+                int nodoId = 1;
+                for (int i = 1; i <= Config.NUM_NODOS; i++) {
+                    if (Config.getPuertoClientes(i) == puertoActual) {
+                        nodoId = i;
+                        break;
+                    }
+                }
+                nodoId = (nodoId % Config.NUM_NODOS) + 1;
+                puertoActual = Config.getPuertoClientes(nodoId);
+
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         }
+        
+        activo = false;
     }
 
     /**

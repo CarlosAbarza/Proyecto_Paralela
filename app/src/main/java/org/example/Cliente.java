@@ -16,6 +16,19 @@ public class Cliente {
     public static void main(String[] args) {
         String host = args.length > 0 ? args[0] : "localhost";
         int puertoInicial = args.length > 1 ? Integer.parseInt(args[1]) : -1;
+        if (args.length > 2) {
+            try {
+                int totalNodos = Integer.parseInt(args[2]);
+                if (totalNodos < 1 || totalNodos >= 1000) {
+                    System.err.println("Error: El número total de nodos debe estar en el rango [1, 999]. Recibido: " + totalNodos);
+                    System.exit(1);
+                }
+                Config.NUM_NODOS = totalNodos;
+            } catch (NumberFormatException e) {
+                System.err.println("Error: totalNodos debe ser un número entero. Recibido: '" + args[2] + "'");
+                System.exit(1);
+            }
+        }
 
         int nodoActual = -1;
         if (puertoInicial != -1) {

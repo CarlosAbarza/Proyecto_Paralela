@@ -26,7 +26,7 @@ public class App {
     private static final Queue<PaqueteMensaje> historial = new ConcurrentLinkedQueue<>();
 
     public static void main(String[] args) {
-        int puerto = args.length > 0 ? Integer.parseInt(args[0]) : Config.PUERTO_CLIENTES_NODO_1;
+        int puerto = args.length > 0 ? Integer.parseInt(args[0]) : Config.getPuertoClientes(1);
 
         try (ServerSocket servidor = new ServerSocket(puerto)) {
             System.out.println("Servidor de Telegram iniciado en puerto " + puerto + "...");

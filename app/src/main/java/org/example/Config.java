@@ -9,18 +9,12 @@ public final class Config {
     public static final int MAX_MENSAJE = 300;
 
     // --- Configuración del Cluster ---
-    public static final int NUM_NODOS = 3;
+    public static int NUM_NODOS = 3;
     public static final String HOST_DEFAULT = "localhost";
 
-    // Puertos para clientes (cada servidor escucha clientes en su puerto)
-    public static final int PUERTO_CLIENTES_NODO_1 = 5001;
-    public static final int PUERTO_CLIENTES_NODO_2 = 5002;
-    public static final int PUERTO_CLIENTES_NODO_3 = 5003;
-
-    // Puertos para comunicación peer-to-peer entre servidores
-    public static final int PUERTO_PEERS_NODO_1 = 6001;
-    public static final int PUERTO_PEERS_NODO_2 = 6002;
-    public static final int PUERTO_PEERS_NODO_3 = 6003;
+    // Puertos base para clientes y peers
+    public static final int PUERTO_CLIENTES_BASE = 5000;
+    public static final int PUERTO_PEERS_BASE = 6000;
 
     // Heartbeat
     public static final int HEARTBEAT_INTERVAL_MS = 3000;
@@ -38,21 +32,17 @@ public final class Config {
 
     // Método helper para obtener el puerto de clientes de un nodo dado su ID
     public static int getPuertoClientes(int nodoId) {
-        switch (nodoId) {
-            case 1: return PUERTO_CLIENTES_NODO_1;
-            case 2: return PUERTO_CLIENTES_NODO_2;
-            case 3: return PUERTO_CLIENTES_NODO_3;
-            default: throw new IllegalArgumentException("Nodo ID inválido: " + nodoId);
+        if (nodoId < 1 || nodoId >= 1000) {
+            throw new IllegalArgumentException("Nodo ID inválido: " + nodoId + ". Rango permitido: [1, 999]");
         }
+        return PUERTO_CLIENTES_BASE + nodoId;
     }
 
     // Método helper para obtener el puerto peer de un nodo dado su ID
     public static int getPuertoPeers(int nodoId) {
-        switch (nodoId) {
-            case 1: return PUERTO_PEERS_NODO_1;
-            case 2: return PUERTO_PEERS_NODO_2;
-            case 3: return PUERTO_PEERS_NODO_3;
-            default: throw new IllegalArgumentException("Nodo ID inválido: " + nodoId);
+        if (nodoId < 1 || nodoId >= 1000) {
+            throw new IllegalArgumentException("Nodo ID inválido: " + nodoId + ". Rango permitido: [1, 999]");
         }
+        return PUERTO_PEERS_BASE + nodoId;
     }
 }

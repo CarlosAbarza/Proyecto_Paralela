@@ -15,7 +15,21 @@ public class ClusterLauncher {
     private static final List<Process> procesos = new ArrayList<>();
 
     public static void main(String[] args) {
-        System.out.println("=== INICIANDO CLÚSTER DE SERVIDORES ===");
+        if (args.length > 0) {
+            try {
+                int totalNodos = Integer.parseInt(args[0]);
+                if (totalNodos < 1 || totalNodos >= 1000) {
+                    System.err.println("Error: El número total de nodos debe estar en el rango [1, 999]. Recibido: " + totalNodos);
+                    System.exit(1);
+                }
+                Config.NUM_NODOS = totalNodos;
+            } catch (NumberFormatException e) {
+                System.err.println("Error: totalNodos debe ser un número entero. Recibido: '" + args[0] + "'");
+                System.exit(1);
+            }
+        }
+
+        System.out.println("=== INICIANDO CLÚSTER DE " + Config.NUM_NODOS + " SERVIDORES ===");
 
         // Crear directorio de logs si no existe
         File logsDir = new File("logs");
@@ -44,7 +58,8 @@ public class ClusterLauncher {
                     "java",
                     "-cp", classPath,
                     "org.example.NodoServidor",
-                    String.valueOf(nodoId)
+                    String.valueOf(nodoId),
+                    String.valueOf(Config.NUM_NODOS)
                 );
 
                 // Redirigir salida e historia de logs

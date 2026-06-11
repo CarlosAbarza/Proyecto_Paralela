@@ -42,19 +42,23 @@ public class AlgoritmoBully {
         eleccionEnCurso = true;
         recibiOk = false;
 
+        if (timeoutFuture != null) {
+            timeoutFuture.cancel(false);
+        }
+
         log.registrar("ELECCION", "Iniciando elección Bully desde Nodo " + nodoId, reloj.tick());
 
-        // Enviar ELECTION a todos los nodos con ID mayor
+        // Enviar ELECTION a todos los nodos con ID mayor conectados activamente
         boolean envioAlguno = false;
         /*
          * CICLO DE BÚSQUEDA Y MENSAJE DE ELECCIÓN:
          * - Qué hace: Envía un mensaje de tipo ELECTION a todos los nodos del clúster que tengan un ID mayor que el nuestro.
-         * - Con quién se comunica: Con los servidores (peers) del clúster con ID superior que estén activos o cuyo estado sea desconocido.
-         * - De qué depende: Del estado del registro de membresía y de que las conexiones peer correspondientes estén configuradas.
+         * - Con quién se comunica: Con los servidores (peers) del clúster con ID superior que estén conectados activamente.
+         * - De qué depende: Del mapa de conexiones directas peer activas.
          */
         for (int id = nodoId + 1; id <= Config.NUM_NODOS; id++) {
-            if (servidor.getMembresia().isActivo(id) || 
-                servidor.getMembresia().getEstado(id) == MembresiaCluster.EstadoNodo.DESCONOCIDO) {
+            ConexionPeer peer = servidor.getPeers().get(id);
+            if (peer != null && peer.isConectado()) {
                 PaqueteMensaje election = new PaqueteMensaje(
                     "Nodo" + nodoId,
                     String.valueOf(nodoId),
@@ -67,7 +71,7 @@ public class AlgoritmoBully {
         }
 
         if (!envioAlguno) {
-            // No hay nadie con ID mayor → yo soy el coordinador
+            // No hay nadie con ID mayor activo → yo soy el coordinador de inmediato
             declararCoordinador();
             return;
         }

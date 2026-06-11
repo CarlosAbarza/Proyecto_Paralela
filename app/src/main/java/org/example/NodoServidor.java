@@ -76,7 +76,7 @@ public class NodoServidor {
         this.reloj = new RelojLamport();
         this.log = new EventLog(nodoId);
         this.membresia = new MembresiaCluster(nodoId);
-        this.coordinadorId = Config.NUM_NODOS; // El de mayor ID es coordinador inicial
+        this.coordinadorId = nodoId; // Cada nodo asume de manera optimista que es su propio coordinador inicial
     }
 
     // ==================== INICIO ====================
@@ -204,6 +204,15 @@ public class NodoServidor {
             if (!(authObj instanceof PaqueteMensaje)) return false;
 
             PaqueteMensaje auth = (PaqueteMensaje) authObj;
+            if (auth.getTipo() == PaqueteMensaje.Tipo.SHUTDOWN) {
+                if (Config.TOKEN_VALIDO.equals(auth.getContenido())) {
+                    log.registrar("SISTEMA", "Recibida señal de APAGADO administrativo local en paso AUTH. Apagando...", reloj.tick());
+                    log.flush();
+                    System.out.println("[NODO " + nodoId + "] Recibida señal de APAGADO administrativo en AUTH. Deteniendo...");
+                    System.exit(0);
+                }
+            }
+
             if (auth.getTipo() != PaqueteMensaje.Tipo.AUTH ||
                     !Config.TOKEN_VALIDO.equals(auth.getContenido())) {
                 log.registrar("AUTH", "Token inválido desde " + socket.getInetAddress(), reloj.tick());
@@ -244,7 +253,9 @@ public class NodoServidor {
             // para evitar ventana de race donde broadcasts se pierden.
             clientesLocales.add(new ClienteInfo(out, nombreAsignado));
 
-            enviarHistorial();
+            if (!nombreAsignado.equals("BotCentral")) {
+                enviarHistorial();
+            }
 
             PaqueteMensaje anuncio = new PaqueteMensaje("Servidor",
                     nombreAsignado + " se ha unido al chat (Nodo " + nodoId + ").",
@@ -295,6 +306,16 @@ public class NodoServidor {
 
             // Comando /aprender → requiere exclusión mutua (token ring)
             if (contenido.startsWith("/aprender") && tokenRing != null) {
+                // Difundir el comando /aprender en el chat para que sea visible para todos
+                PaqueteMensaje cmdMsg = new PaqueteMensaje(
+                        nombreAsignado, contenido, mensajeRecibido.getTipo());
+                int marcaCmd = reloj.tick();
+                cmdMsg.setLamportTimestamp(marcaCmd);
+                cmdMsg.setNodoOrigenId(nodoId);
+                actualizarHistorial(cmdMsg);
+                difundirLocal(cmdMsg);
+                replicarAPeers(cmdMsg);
+
                 String[] partes = contenido.split(" ", 3);
                 if (contenido.startsWith("/aprender ") && partes.length >= 3) {
                     String nuevoCmd = partes[1].toLowerCase();
@@ -347,6 +368,16 @@ public class NodoServidor {
                 String cmd = contenido.trim().split(" ")[0].toLowerCase();
                 String respuestaAprendida = recursoCritico.leerComando(cmd);
                 if (respuestaAprendida != null) {
+                    // Difundir el comando invocado en el chat para que sea visible para todos
+                    PaqueteMensaje cmdMsg = new PaqueteMensaje(
+                            nombreAsignado, contenido, mensajeRecibido.getTipo());
+                    int marcaCmd = reloj.tick();
+                    cmdMsg.setLamportTimestamp(marcaCmd);
+                    cmdMsg.setNodoOrigenId(nodoId);
+                    actualizarHistorial(cmdMsg);
+                    difundirLocal(cmdMsg);
+                    replicarAPeers(cmdMsg);
+
                     PaqueteMensaje resp = new PaqueteMensaje("Bot",
                         respuestaAprendida, PaqueteMensaje.Tipo.TEXTO);
                     resp.setLamportTimestamp(reloj.tick());
@@ -584,9 +615,11 @@ public class NodoServidor {
         } catch (IOException | ClassNotFoundException e) {
             log.registrar("PEER", "Conexión perdida con Nodo " + peerId, reloj.tick());
             peers.remove(peerId);
-            // NO marcar como caído aquí — eso lo hará el HeartbeatManager (Fase 4)
-            // Por ahora, marcamos manualmente:
             membresia.marcarCaido(peerId);
+            if (peerId == coordinadorId) {
+                log.registrar("FALLO", "El coordinador (Nodo " + peerId + ") cayó (conexión socket perdida). Iniciando elección Bully...", reloj.tick());
+                algoritmoBully.iniciarEleccion();
+            }
         }
     }
 
@@ -731,6 +764,7 @@ public class NodoServidor {
         );
         replica.setLamportTimestamp(mensajeOriginal.getLamportTimestamp());
         replica.setNodoOrigenId(nodoId);
+        replica.setEpoch(mensajeOriginal.getEpoch()); // Copiar época para consistencia
 
         for (Map.Entry<Integer, ConexionPeer> entry : peers.entrySet()) {
             ConexionPeer peer = entry.getValue();
@@ -779,6 +813,7 @@ public class NodoServidor {
             // Crear copia independiente para cada peer (cada envío asigna su propia marca Lamport)
             PaqueteMensaje copia = new PaqueteMensaje(
                 msg.getRemitente(), msg.getContenido(), msg.getTipo());
+            copia.setEpoch(msg.getEpoch()); // Copiar época para evitar pérdida del token
             enviarAPeer(id, copia);
         }
     }
@@ -791,8 +826,14 @@ public class NodoServidor {
         this.coordinadorId = id;
         if (id == nodoId) {
             epochCoordinador.incrementAndGet();
+            if (tokenRing != null) {
+                tokenRing.regenerarToken();
+            }
         }
         log.registrar("COORDINADOR", "Coordinador actualizado a Nodo " + id + " (época " + epochCoordinador.get() + ")", reloj.tick());
+        System.out.println("\n==================================================");
+        System.out.println(">>> [NODO " + nodoId + "] COORDINADOR ACTUAL: NODO " + id + " (Época " + epochCoordinador.get() + ") <<<");
+        System.out.println("==================================================\n");
     }
     public int getEpochCoordinador() { return epochCoordinador.get(); }
     public void setEpochCoordinador(int epoch) { this.epochCoordinador.set(epoch); }
@@ -864,8 +905,9 @@ public class NodoServidor {
 
     public static void main(String[] args) {
         if (args.length < 1) {
-            System.err.println("Uso: java NodoServidor <nodoId>");
-            System.err.println("  nodoId: 1, 2 o 3");
+            System.err.println("Uso: java NodoServidor <nodoId> [totalNodos]");
+            System.err.println("  nodoId: ID del nodo actual (ej: 1, 2, 3, ...)");
+            System.err.println("  totalNodos (opcional): cantidad total de nodos en el cluster (por defecto es 3)");
             System.exit(1);
         }
 
@@ -878,8 +920,27 @@ public class NodoServidor {
             return;
         }
 
+        if (nodoId >= 1000) {
+            System.err.println("Error: El ID de nodo no puede ser mayor o igual a 1000 debido a posible solapamiento de puertos.");
+            System.exit(1);
+        }
+
+        if (args.length >= 2) {
+            try {
+                int totalNodos = Integer.parseInt(args[1]);
+                if (totalNodos < 1 || totalNodos >= 1000) {
+                    System.err.println("Error: El número total de nodos debe estar en el rango [1, 999]. Recibido: " + totalNodos);
+                    System.exit(1);
+                }
+                Config.NUM_NODOS = totalNodos;
+            } catch (NumberFormatException e) {
+                System.err.println("Error: totalNodos debe ser un número entero. Recibido: '" + args[1] + "'");
+                System.exit(1);
+            }
+        }
+
         if (nodoId < 1 || nodoId > Config.NUM_NODOS) {
-            System.err.println("nodoId debe estar entre 1 y " + Config.NUM_NODOS);
+            System.err.println("Error: nodoId (" + nodoId + ") debe estar entre 1 y " + Config.NUM_NODOS + " (total de nodos configurados).");
             System.exit(1);
         }
 

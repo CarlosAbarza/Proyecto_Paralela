@@ -27,25 +27,46 @@ public class GeneradorCarga {
         int numClientes = Config.CARGA_NUM_CLIENTES; // 50
         int duracion = Config.CARGA_DURACION_SEGUNDOS; // 60
 
+        if (args.length > 1) {
+            try {
+                numClientes = Integer.parseInt(args[1]);
+            } catch (NumberFormatException e) {
+                // Si no es un número válido, mantener default
+            }
+        }
+
+        if (args.length > 2) {
+            try {
+                int totalNodos = Integer.parseInt(args[2]);
+                if (totalNodos < 1 || totalNodos >= 1000) {
+                    System.err.println("Error: El número total de nodos debe estar en el rango [1, 999]. Recibido: " + totalNodos);
+                    System.exit(1);
+                }
+                Config.NUM_NODOS = totalNodos;
+            } catch (NumberFormatException e) {
+                System.err.println("Error: totalNodos debe ser un número entero. Recibido: '" + args[2] + "'");
+                System.exit(1);
+            }
+        }
+
+        int[] puertos = new int[Config.NUM_NODOS];
+        StringBuilder servsBuilder = new StringBuilder();
+        for (int i = 0; i < Config.NUM_NODOS; i++) {
+            puertos[i] = Config.getPuertoClientes(i + 1);
+            if (i > 0) servsBuilder.append(", ");
+            servsBuilder.append(puertos[i]);
+        }
+        String servidoresStr = servsBuilder.toString();
+
         System.out.println("╔══════════════════════════════════════════════════╗");
         System.out.println("║         GENERADOR DE CARGA — PROYECTO FINAL     ║");
         System.out.println("╠══════════════════════════════════════════════════╣");
         System.out.printf("║  Host:                %-26s║%n", host);
         System.out.printf("║  Clientes simultáneos: %-25d║%n", numClientes);
         System.out.printf("║  Duración:            %-23s  ║%n", duracion + " segundos");
-        System.out.printf("║  Servidores:          %-25s║%n",
-                Config.PUERTO_CLIENTES_NODO_1 + ", " +
-                Config.PUERTO_CLIENTES_NODO_2 + ", " +
-                Config.PUERTO_CLIENTES_NODO_3);
+        System.out.printf("║  Servidores:          %-25s║%n", servidoresStr);
         System.out.println("╚══════════════════════════════════════════════════╝");
         System.out.println();
-
-        // Puertos de los 3 servidores
-        int[] puertos = {
-            Config.PUERTO_CLIENTES_NODO_1,
-            Config.PUERTO_CLIENTES_NODO_2,
-            Config.PUERTO_CLIENTES_NODO_3
-        };
 
         RecolectorMetricas metricas = new RecolectorMetricas();
         ExecutorService pool = Executors.newFixedThreadPool(numClientes);
@@ -57,18 +78,18 @@ public class GeneradorCarga {
         /*
          * CICLO DE INICIALIZACIÓN DE CLIENTES SIMULTÁNEOS:
          * - Qué hace: Crea y lanza individualmente cada ClienteCarga en el pool de hilos.
-         * - Con quién se comunica: Registra localmente cada cliente en la lista 'clientes' y los asigna en round-robin a los 3 servidores.
+         * - Con quién se comunica: Registra localmente cada cliente en la lista 'clientes' y los asigna en round-robin a los servidores.
          * - De qué depende: De la configuración 'numClientes'.
          */
         for (int i = 0; i < numClientes; i++) {
-            int puerto = puertos[i % 3]; // Round-robin entre los 3 servidores
+            int puerto = puertos[i % Config.NUM_NODOS]; // Round-robin entre todos los servidores
             String nombre = "C" + String.format("%03d", i);
             ClienteCarga cliente = new ClienteCarga(host, puerto, nombre, duracion, metricas);
             clientes.add(cliente);
             pool.submit(cliente);
         }
 
-        System.out.println("✓ " + numClientes + " clientes lanzados (distribuidos entre 3 servidores).");
+        System.out.println("✓ " + numClientes + " clientes lanzados (distribuidos entre " + Config.NUM_NODOS + " servidores).");
         System.out.println();
 
         // --- Hilo para simular falla inducida de forma automática (Punto 4) ---
@@ -77,8 +98,8 @@ public class GeneradorCarga {
                 System.out.println("[AUTOMACIÓN] Esperando 30 segundos para derribar al coordinador...");
                 Thread.sleep(30000);
                 
-                // Derribar al coordinador (Nodo 3)
-                int nodoADerribar = 3;
+                // Derribar al coordinador (Nodo con mayor ID)
+                int nodoADerribar = Config.NUM_NODOS;
                 int puertoADerribar = Config.getPuertoClientes(nodoADerribar);
                 System.out.println("[AUTOMACIÓN] Enviando señal de apagado automático al Nodo " + nodoADerribar + " (puerto " + puertoADerribar + ")...");
                 
@@ -156,6 +177,11 @@ public class GeneradorCarga {
         System.out.println();
         System.out.println("✓ Prueba de carga finalizada.");
         System.out.println("✓ Reporte en: logs/reporte_carga.txt");
-        System.out.println("✓ Logs de nodos en: logs/nodo_1.log, logs/nodo_2.log, logs/nodo_3.log");
+        StringBuilder logsMsg = new StringBuilder("✓ Logs de nodos en: ");
+        for (int i = 1; i <= Config.NUM_NODOS; i++) {
+            if (i > 1) logsMsg.append(", ");
+            logsMsg.append("logs/nodo_").append(i).append(".log");
+        }
+        System.out.println(logsMsg.toString());
     }
 }
